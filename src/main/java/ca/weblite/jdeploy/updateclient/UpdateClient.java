@@ -35,61 +35,122 @@ public class UpdateClient {
         IGNORE
     }
 
-    public void requireVersion(String version) {
-        String jdeployAppVersion = System.getProperty("jdeploy.app.version");
-        if (jdeployAppVersion == null || isBranchVersion(jdeployAppVersion) || compareVersion(jdeployAppVersion, version) >= 0) {
-           return;
+    /**
+            * Legacy requireVersion API that derives application metadata from local package.json.
+            *
+            * <p>This method is deprecated. Prefer the parameters-based overload
+            * {@link #requireVersion(String, UpdateParameters)} which does not require filesystem access
+            * and accepts explicit application metadata.</p>
+            *
+            * @param requiredVersion the required version string
+            * @deprecated Use {@link #requireVersion(String, UpdateParameters)} and supply an {@link UpdateParameters}
+            *             instance describing the application (packageName, optional source, optional appTitle,
+            *             optional currentVersion).
+            */
+          @Deprecated
+          public void requireVersion(String requiredVersion) {
+                 if (requiredVersion == null || requiredVersion.isEmpty()) {
+                       return;
+                 }
+
+                 try {
+                       // Locate package.json from the running jar location and parse it for package metadata.
+                       Path jarPath = findCurrentJarPath();
+                       Path packageJsonPath = findPackageJson(jarPath.toString());
+                       PackageInfo packageInfo = parsePackageJson(packageJsonPath);
+
+                       String packageName = packageInfo.name;
+                       String source = packageInfo.source == null ? "" : packageInfo.source;
+                       String appTitle = packageInfo.appTitle == null ? packageName : packageInfo.appTitle;
+
+                       // Resolve current version from system property (legacy behavior)
+                       String currentVersion = System.getProperty("jdeploy.app.version");
+
+                       UpdateParameters params = new UpdateParameters.Builder(packageName)
+                                    .source(source)
+                                    .appTitle(appTitle)
+                                    .currentVersion(currentVersion)
+                                    .build();
+
+                       // Delegate to the new parameters-based overload
+                       requireVersion(requiredVersion, params);
+                 } catch (IOException e) {
+                       // Preserve legacy behavior: silently ignore failures to read package.json or related IO errors.
+                       return;
+                 }
+          }
+
+    /**
+     * Overload of requireVersion that accepts an UpdateParameters instance so callers
+     * can perform update checks without needing a local package.json or file system access.
+     *
+     * Legacy semantics are preserved:
+     * - Resolve currentVersion from params.getCurrentVersion(), or fall back to System.getProperty("jdeploy.app.version").
+     * - If currentVersion is null, or is a branch version, or compareVersion(currentVersion, requiredVersion) >= 0
+     *   then the method returns early (no prompt or network access).
+     *
+     * @param requiredVersion the required version string
+     * @param params parameters describing the application (packageName is required)
+     */
+    public void requireVersion(String requiredVersion, UpdateParameters params) {
+        if (requiredVersion == null || requiredVersion.isEmpty()) {
+            return;
+        }
+        if (params == null) {
+            throw new IllegalArgumentException("params must not be null");
+        }
+
+        // Resolve current version from params, falling back to system property
+        String currentVersion = params.getCurrentVersion();
+        if (currentVersion == null || currentVersion.isEmpty()) {
+            currentVersion = System.getProperty("jdeploy.app.version");
+        }
+
+        // Legacy semantics: if currentVersion is null, or a branch version, or already >= requiredVersion, return early
+        if (currentVersion == null || isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
+            return;
         }
 
         boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
 
+        String packageName = params.getPackageName();
+        String source = params.getSource() == null ? "" : params.getSource();
+        String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
+
         try {
-            // Parse package.json to identify package/source (avoid network if user has ignored/deferral set)
-            PackageInfo packageInfo = parsePackageJson(findPackageJson(findCurrentJarPath().toString()));
+                    // Early preferences gating using helper
+                    if (shouldSkipPrompt(packageName, source, requiredVersion)) {
+                        return;
+                    }
 
-            // Early preferences gating:
-            // - "update.ignore.<safeKey>" stores an ignored version string for a package+source
-            // - "update.deferUntil.<safeKey>" stores a timestamp (ms since epoch) until which updates are deferred
-            // If the user has chosen "Ignore" for this package/source (matching the required version), return.
-            String ignoredVersion = getIgnoredVersion(packageInfo.name, packageInfo.source);
-            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(version)) {
-                return;
-            }
+                    // Fetch latest version (network)
+                    String latestVersion = findLatestVersion(packageName, source, isPrerelease);
 
-            // If the user deferred updates until a future time, and that time has not yet passed, return.
-            long deferUntil = getDeferUntil(packageInfo.name, packageInfo.source);
-            if (System.currentTimeMillis() < deferUntil) {
-                return;
-            }
+                    // If user chose to ignore this specific latest version previously, skip prompting
+                    String ignoredVersion = getIgnoredVersion(packageName, source);
+                    if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
+                        return;
+                    }
 
-            // Now fetch latest version (network)
-            String latestVersion = findLatestVersion(packageInfo.name, packageInfo.source, isPrerelease);
-
-            // If user chose to ignore this specific latest version previously, skip prompting
-            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
-                return;
-            }
-
-            UpdateDecision decision = promptForUpdate(packageInfo.name, packageInfo.appTitle, jdeployAppVersion, version, packageInfo.source);
+            UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion, source);
 
             if (decision == UpdateDecision.IGNORE) {
                 // Persist ignored version so we don't prompt again for this exact version
-                setIgnoredVersion(packageInfo.name, packageInfo.source, latestVersion);
+                setIgnoredVersion(packageName, source, latestVersion);
                 return;
             } else if (decision == UpdateDecision.LATER) {
                 long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
-                setDeferUntil(packageInfo.name, packageInfo.source, until);
+                setDeferUntil(packageName, source, until);
                 return;
             } else {
                 // UPDATE_NOW - proceed to download & run installer for latestVersion
-                String installer = downloadInstaller(packageInfo.name, latestVersion, packageInfo.source, System.getProperty("java.io.tmpdir"));
+                String installer = downloadInstaller(packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
                 runInstaller(installer);
             }
         } catch (IOException e) {
-            // On any IO error, we silently ignore update attempt
+            // On any IO error, silently ignore update attempt
             return;
         }
-
     }
 
     /**
@@ -390,48 +451,77 @@ public class UpdateClient {
 
     private void runInstaller(String installerPath) {
         if (installerPath == null || installerPath.isEmpty()) {
+            System.err.println("runInstaller: installerPath is null or empty");
             return;
         }
 
+        File installer = new File(installerPath);
+        if (!installer.exists()) {
+            System.err.println("runInstaller: installer not found: " + installerPath);
+            return;
+        }
+
+        // Best-effort: make executable on Unix-like systems
         try {
-            File installer = new File(installerPath);
-            if (!installer.exists()) {
-                return;
+            if (!installer.canExecute()) {
+                installer.setExecutable(true);
             }
+        } catch (Exception ignored) {
+        }
 
-            // Attempt to make executable on Unix-like systems
-            try {
-                if (!installer.canExecute()) {
-                    installer.setExecutable(true);
-                }
-            } catch (Exception ignored) {
-            }
+        String os = System.getProperty("os.name").toLowerCase();
+        Process launchedProcess = null;
 
-            ProcessBuilder pb;
-            String os = System.getProperty("os.name").toLowerCase();
-            if (os.contains("mac") && installerPath.endsWith(".dmg")) {
-                // Use 'open' for dmg on macOS
-                pb = new ProcessBuilder("open", installerPath);
-            } else if (os.contains("mac") && installerPath.endsWith(".pkg")) {
-                pb = new ProcessBuilder("open", installerPath);
+        try {
+            if (os.contains("mac")) {
+                // Use 'open' for macOS (works for .dmg, .pkg, .app bundles, etc.)
+                ProcessBuilder pb = new ProcessBuilder("open", installerPath);
+                pb.inheritIO();
+                launchedProcess = pb.start();
             } else if (os.contains("win")) {
-                pb = new ProcessBuilder(installerPath);
+                // Use cmd /c start "" <path> to launch non-blocking on Windows
+                // The empty string "" is the window title argument for start
+                ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "", installerPath);
+                // Do not inheritIO for cmd start; it will detach the process
+                launchedProcess = pb.start();
             } else {
-                // Linux/other - attempt to execute directly
-                pb = new ProcessBuilder(installerPath);
+                // Assume Linux/other Unix-like
+                try {
+                    // Try to open with xdg-open first (desktop-friendly)
+                    ProcessBuilder pb = new ProcessBuilder("xdg-open", installerPath);
+                    pb.inheritIO();
+                    launchedProcess = pb.start();
+                } catch (IOException xdgEx) {
+                    // If xdg-open isn't available, and the file is executable, run it directly
+                    if (installer.canExecute()) {
+                        try {
+                            ProcessBuilder pb2 = new ProcessBuilder(installerPath);
+                            pb2.inheritIO();
+                            launchedProcess = pb2.start();
+                        } catch (IOException execEx) {
+                            System.err.println("runInstaller: failed to execute installer directly: " + execEx.getMessage());
+                            execEx.printStackTrace();
+                        }
+                    } else {
+                        System.err.println("runInstaller: xdg-open failed and installer is not executable: " + installerPath);
+                    }
+                }
             }
 
-            pb.inheritIO();
-            pb.start();
-        } catch (IOException e) {
-            // Best effort; if launching fails, just return
-            e.printStackTrace();
-        } finally {
-            // Exit the JVM to allow installer to proceed / replace files if needed
-            try {
-                System.exit(0);
-            } catch (SecurityException ignored) {
+            if (launchedProcess != null) {
+                System.out.println("runInstaller: Launched installer: " + installerPath);
+                // Do not wait for installer to finish; exit the JVM to allow installer to replace files
+                try {
+                    System.exit(0);
+                } catch (SecurityException se) {
+                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
+                }
+            } else {
+                System.err.println("runInstaller: Failed to launch installer: " + installerPath);
             }
+        } catch (IOException e) {
+            System.err.println("runInstaller: IOException while launching installer: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -547,6 +637,8 @@ public class UpdateClient {
         URL url = new URL(urlString);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setConnectTimeout(2000);
+        // Ensure read operations time out to avoid hanging downloads
+        connection.setReadTimeout(10000);
         connection.setRequestMethod("GET");
 
         int responseCode = connection.getResponseCode();
@@ -721,7 +813,26 @@ public class UpdateClient {
      * The safeKey is derived from packageName + '|' + source and URL-encoded via `encode()`.
      */
 
+    // Optional override for tests so they can use an isolated prefs node.
+    private String preferencesNodeName = null;
+
+    /**
+     * Package-visible setter to direct the UpdateClient to use a specific Preferences node.
+     * Tests should call this with a unique node path (for example "/test/jdeploy/..." + UUID)
+     * to avoid polluting global/user preferences.
+     */
+    void setPreferencesNodeName(String nodeName) {
+        this.preferencesNodeName = nodeName;
+    }
+
     private Preferences preferences() {
+        if (preferencesNodeName != null && !preferencesNodeName.isEmpty()) {
+            try {
+                return Preferences.userRoot().node(preferencesNodeName);
+            } catch (Exception ignored) {
+                // Fallthrough to default if any error occurs
+            }
+        }
         return Preferences.userNodeForPackage(UpdateClient.class);
     }
 
@@ -729,11 +840,14 @@ public class UpdateClient {
         return encode((packageName == null ? "" : packageName) + "|" + (source == null ? "" : source));
     }
 
-    private String getIgnoredVersion(String packageName, String source) {
+    // The following preference helpers are package-private so unit tests in the same package
+    // can directly manipulate and assert preference state without relying on UI/IO flows.
+
+    String getIgnoredVersion(String packageName, String source) {
         return preferences().get("update.ignore." + safeKeyFor(packageName, source), null);
     }
 
-    private void setIgnoredVersion(String packageName, String source, String version) {
+    void setIgnoredVersion(String packageName, String source, String version) {
         String key = "update.ignore." + safeKeyFor(packageName, source);
         if (version == null) {
             preferences().remove(key);
@@ -742,12 +856,30 @@ public class UpdateClient {
         }
     }
 
-    private long getDeferUntil(String packageName, String source) {
+    long getDeferUntil(String packageName, String source) {
         return preferences().getLong("update.deferUntil." + safeKeyFor(packageName, source), 0L);
     }
 
-    private void setDeferUntil(String packageName, String source, long until) {
+    void setDeferUntil(String packageName, String source, long until) {
         preferences().putLong("update.deferUntil." + safeKeyFor(packageName, source), until);
+    }
+
+    /**
+     * Helper to evaluate whether prompting should be skipped for the given package/source/version.
+     * This encapsulates the early preferences gating logic (Ignore / Later) so tests can verify it
+     * without invoking file-system or network operations.
+     *
+     * Returns true if:
+     * - The user has chosen to ignore this exact requiredVersion for the package/source, OR
+     * - The user deferred updates (deferUntil) and the current time is before that timestamp.
+     */
+    boolean shouldSkipPrompt(String packageName, String source, String requiredVersion) {
+        String ignoredVersion = getIgnoredVersion(packageName, source);
+        if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(requiredVersion)) {
+            return true;
+        }
+        long deferUntil = getDeferUntil(packageName, source);
+        return System.currentTimeMillis() < deferUntil;
     }
 
     /**
