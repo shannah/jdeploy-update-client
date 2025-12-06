@@ -372,7 +372,20 @@ public class UpdateClient {
      * @param version if null -> remove the ignore preference, otherwise persist the ignored version string
      */
     private void markUpdateDeclined(String packageName, String source, String version) {
-        setIgnoredVersion(packageName, source, version);
+        // Defer updates for DEFAULT_DEFER_DAYS days from now.
+        long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
+        setDeferUntil(packageName, source, until);
+
+        // Clear any previously set "ignore this version" flag so ignore doesn't interfere with deferral.
+        setIgnoredVersion(packageName, source, null);
+
+        // Optionally store the version that was deferred for reference (no logic depends on it).
+        try {
+            preferences().put("update.deferVersion." + safeKeyFor(packageName, source),
+                    version == null ? "" : version);
+        } catch (Exception ignored) {
+            // Best-effort; do not fail update flow if preferences cannot be written.
+        }
     }
 
     private void runInstaller(String installerPath) {
