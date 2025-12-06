@@ -106,6 +106,16 @@ public class UpdateClient {
     private UpdateDecision promptForUpdate(String packageName, String appTitle, String currentVersion, String requiredVersion, String source) {
         final UpdateDecision[] result = new UpdateDecision[]{UpdateDecision.LATER};
 
+        // If running in a headless environment, we cannot show UI — default to LATER.
+        try {
+            if (GraphicsEnvironment.isHeadless()) {
+                return UpdateDecision.LATER;
+            }
+        } catch (Exception e) {
+            // If detection fails for any reason, be conservative and defer the update.
+            return UpdateDecision.LATER;
+        }
+
         Runnable r = () -> {
             String title = (appTitle != null && !appTitle.isEmpty()) ? appTitle : packageName;
             String message = title + " has an available update.\n\n" +
@@ -136,7 +146,7 @@ public class UpdateClient {
                     result[0] = UpdateDecision.IGNORE;
                     break;
                 default:
-                    // treat closed dialog as Later
+                    // Treat closed dialog or unexpected return as LATER
                     result[0] = UpdateDecision.LATER;
             }
         };
