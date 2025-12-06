@@ -4,6 +4,8 @@ import com.eclipsesource.json.Json;
 import com.eclipsesource.json.JsonObject;
 import com.eclipsesource.json.JsonValue;
 
+import javax.swing.*;
+import java.awt.*;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -17,12 +19,21 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.prefs.Preferences;
 
 /**
  * Client for checking and installing application updates.
  */
 public class UpdateClient {
 
+    // Defer period in days when user chooses "Later"
+    private static final int DEFAULT_DEFER_DAYS = 7;
+
+    private enum UpdateDecision {
+        UPDATE_NOW,
+        LATER,
+        IGNORE
+    }
 
     public void requireVersion(String version) {
         String jdeployAppVersion = System.getProperty("jdeploy.app.version");
@@ -33,15 +44,49 @@ public class UpdateClient {
         boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
 
         try {
+            // Parse package.json to identify package/source (avoid network if user has ignored/deferral set)
             PackageInfo packageInfo = parsePackageJson(findPackageJson(findCurrentJarPath().toString()));
-            String latestVersion = findLatestVersion(packageInfo.name, packageInfo.source, isPrerelease);
-            if (!promptForUpdate(packageInfo.name, packageInfo.appTitle, jdeployAppVersion, version, packageInfo.source)) {
-                markUpdateDeclined(packageInfo.name, packageInfo.source, latestVersion);
+
+            // Early preferences gating:
+            // - "update.ignore.<safeKey>" stores an ignored version string for a package+source
+            // - "update.deferUntil.<safeKey>" stores a timestamp (ms since epoch) until which updates are deferred
+            // If the user has chosen "Ignore" for this package/source (matching the required version), return.
+            String ignoredVersion = getIgnoredVersion(packageInfo.name, packageInfo.source);
+            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(version)) {
                 return;
             }
-            String installer = downloadInstaller(packageInfo.name, latestVersion, packageInfo.source, System.getProperty("java.io.tmpdir"));
-            runInstaller(installer);
+
+            // If the user deferred updates until a future time, and that time has not yet passed, return.
+            long deferUntil = getDeferUntil(packageInfo.name, packageInfo.source);
+            if (System.currentTimeMillis() < deferUntil) {
+                return;
+            }
+
+            // Now fetch latest version (network)
+            String latestVersion = findLatestVersion(packageInfo.name, packageInfo.source, isPrerelease);
+
+            // If user chose to ignore this specific latest version previously, skip prompting
+            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
+                return;
+            }
+
+            UpdateDecision decision = promptForUpdate(packageInfo.name, packageInfo.appTitle, jdeployAppVersion, version, packageInfo.source);
+
+            if (decision == UpdateDecision.IGNORE) {
+                // Persist ignored version so we don't prompt again for this exact version
+                setIgnoredVersion(packageInfo.name, packageInfo.source, latestVersion);
+                return;
+            } else if (decision == UpdateDecision.LATER) {
+                long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
+                setDeferUntil(packageInfo.name, packageInfo.source, until);
+                return;
+            } else {
+                // UPDATE_NOW - proceed to download & run installer for latestVersion
+                String installer = downloadInstaller(packageInfo.name, latestVersion, packageInfo.source, System.getProperty("java.io.tmpdir"));
+                runInstaller(installer);
+            }
         } catch (IOException e) {
+            // On any IO error, we silently ignore update attempt
             return;
         }
 
@@ -49,15 +94,65 @@ public class UpdateClient {
 
     /**
      * Prompts the user to update the application using Swing dialog.
+     * Returns a tri-state decision: UPDATE_NOW, LATER, IGNORE.
+     *
      * @param packageName
      * @param appTitle
      * @param currentVersion
      * @param requiredVersion
      * @param source
-     * @return
+     * @return UpdateDecision chosen by user
      */
-    private boolean promptForUpdate(String packageName, String appTitle, String currentVersion, String requiredVersion, String source) {
-        throw new UnsupportedOperationException();
+    private UpdateDecision promptForUpdate(String packageName, String appTitle, String currentVersion, String requiredVersion, String source) {
+        final UpdateDecision[] result = new UpdateDecision[]{UpdateDecision.LATER};
+
+        Runnable r = () -> {
+            String title = (appTitle != null && !appTitle.isEmpty()) ? appTitle : packageName;
+            String message = title + " has an available update.\n\n" +
+                    "Current version: " + (currentVersion != null ? currentVersion : "unknown") + "\n" +
+                    "Required version: " + (requiredVersion != null ? requiredVersion : "unknown") + "\n\n" +
+                    "Would you like to update now?";
+
+            Object[] options = new Object[] {"Update Now", "Later", "Ignore This Version"};
+            int opt = JOptionPane.showOptionDialog(
+                    null,
+                    message,
+                    "Update Available - " + title,
+                    JOptionPane.DEFAULT_OPTION,
+                    JOptionPane.INFORMATION_MESSAGE,
+                    null,
+                    options,
+                    options[0]
+            );
+
+            switch (opt) {
+                case 0:
+                    result[0] = UpdateDecision.UPDATE_NOW;
+                    break;
+                case 1:
+                    result[0] = UpdateDecision.LATER;
+                    break;
+                case 2:
+                    result[0] = UpdateDecision.IGNORE;
+                    break;
+                default:
+                    // treat closed dialog as Later
+                    result[0] = UpdateDecision.LATER;
+            }
+        };
+
+        if (SwingUtilities.isEventDispatchThread()) {
+            r.run();
+        } else {
+            try {
+                SwingUtilities.invokeAndWait(r);
+            } catch (Exception e) {
+                // If UI fails, default to LATER to avoid forcing update
+                return UpdateDecision.LATER;
+            }
+        }
+
+        return result[0];
     }
 
     /**
@@ -259,12 +354,62 @@ public class UpdateClient {
         return parts.length > 1;
     }
 
+    /**
+     * Persist or remove the "ignore this version" flag for a package+source.
+     *
+     * @param packageName package name
+     * @param source package source
+     * @param version if null -> remove the ignore preference, otherwise persist the ignored version string
+     */
     private void markUpdateDeclined(String packageName, String source, String version) {
-        throw new UnsupportedOperationException();
+        setIgnoredVersion(packageName, source, version);
     }
 
     private void runInstaller(String installerPath) {
-        throw new UnsupportedOperationException();
+        if (installerPath == null || installerPath.isEmpty()) {
+            return;
+        }
+
+        try {
+            File installer = new File(installerPath);
+            if (!installer.exists()) {
+                return;
+            }
+
+            // Attempt to make executable on Unix-like systems
+            try {
+                if (!installer.canExecute()) {
+                    installer.setExecutable(true);
+                }
+            } catch (Exception ignored) {
+            }
+
+            ProcessBuilder pb;
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("mac") && installerPath.endsWith(".dmg")) {
+                // Use 'open' for dmg on macOS
+                pb = new ProcessBuilder("open", installerPath);
+            } else if (os.contains("mac") && installerPath.endsWith(".pkg")) {
+                pb = new ProcessBuilder("open", installerPath);
+            } else if (os.contains("win")) {
+                pb = new ProcessBuilder(installerPath);
+            } else {
+                // Linux/other - attempt to execute directly
+                pb = new ProcessBuilder(installerPath);
+            }
+
+            pb.inheritIO();
+            pb.start();
+        } catch (IOException e) {
+            // Best effort; if launching fails, just return
+            e.printStackTrace();
+        } finally {
+            // Exit the JVM to allow installer to proceed / replace files if needed
+            try {
+                System.exit(0);
+            } catch (SecurityException ignored) {
+            }
+        }
     }
 
 
@@ -541,6 +686,45 @@ public class UpdateClient {
         } catch (Exception e) {
             return value;
         }
+    }
+
+    /**
+     * Preference helpers and keys
+     *
+     * Preference key names:
+     * - "update.ignore.<safeKey>" stores the ignored version string for package+source
+     * - "update.deferUntil.<safeKey>" stores the defer-until timestamp (ms since epoch)
+     *
+     * The safeKey is derived from packageName + '|' + source and URL-encoded via `encode()`.
+     */
+
+    private Preferences preferences() {
+        return Preferences.userNodeForPackage(UpdateClient.class);
+    }
+
+    private String safeKeyFor(String packageName, String source) {
+        return encode((packageName == null ? "" : packageName) + "|" + (source == null ? "" : source));
+    }
+
+    private String getIgnoredVersion(String packageName, String source) {
+        return preferences().get("update.ignore." + safeKeyFor(packageName, source), null);
+    }
+
+    private void setIgnoredVersion(String packageName, String source, String version) {
+        String key = "update.ignore." + safeKeyFor(packageName, source);
+        if (version == null) {
+            preferences().remove(key);
+        } else {
+            preferences().put(key, version);
+        }
+    }
+
+    private long getDeferUntil(String packageName, String source) {
+        return preferences().getLong("update.deferUntil." + safeKeyFor(packageName, source), 0L);
+    }
+
+    private void setDeferUntil(String packageName, String source, long until) {
+        preferences().putLong("update.deferUntil." + safeKeyFor(packageName, source), until);
     }
 
     /**
