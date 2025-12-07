@@ -180,10 +180,10 @@ publishing {
 
 // Signing configuration
 signing {
-    // Required for signing artifacts
+    // Only sign when publishing
     required { gradle.taskGraph.hasTask('publish') || gradle.taskGraph.hasTask('publishToMavenLocal') }
 
-    // Use GPG agent configured by setup-java action
+    // Use GPG command for signing
     useGpgCmd()
     sign publishing.publications.mavenJava
 }
