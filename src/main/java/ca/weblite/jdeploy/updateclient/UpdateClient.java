@@ -6,10 +6,12 @@ import com.eclipsesource.json.JsonValue;
 
 import javax.swing.*;
 import java.awt.*;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -17,9 +19,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.prefs.Preferences;
+import java.util.stream.Stream;
 
 /**
  * Client for checking and installing application updates.
@@ -75,36 +80,31 @@ public class UpdateClient {
             *             optional currentVersion).
             */
           @Deprecated
-          public void requireVersion(String requiredVersion) {
+          public void requireVersion(String requiredVersion) throws IOException{
                  if (requiredVersion == null || requiredVersion.isEmpty()) {
                        return;
                  }
 
-                 try {
-                       // Locate package.json from the running jar location and parse it for package metadata.
-                       Path jarPath = findCurrentJarPath();
-                       Path packageJsonPath = findPackageJson(jarPath.toString());
-                       PackageInfo packageInfo = parsePackageJson(packageJsonPath);
+                   // Locate package.json from the running jar location and parse it for package metadata.
+                   Path jarPath = findCurrentJarPath();
+                   Path packageJsonPath = findPackageJson(jarPath.toString());
+                   PackageInfo packageInfo = parsePackageJson(packageJsonPath);
 
-                       String packageName = packageInfo.name;
-                       String source = packageInfo.source == null ? "" : packageInfo.source;
-                       String appTitle = packageInfo.appTitle == null ? packageName : packageInfo.appTitle;
+                   String packageName = packageInfo.name;
+                   String source = packageInfo.source == null ? "" : packageInfo.source;
+                   String appTitle = packageInfo.appTitle == null ? packageName : packageInfo.appTitle;
 
-                       // Resolve current version from system property (legacy behavior)
-                       String currentVersion = System.getProperty("jdeploy.app.version");
+                   // Resolve current version from system property (legacy behavior)
+                   String currentVersion = System.getProperty("jdeploy.app.version");
 
-                       UpdateParameters params = new UpdateParameters.Builder(packageName)
-                                    .source(source)
-                                    .appTitle(appTitle)
-                                    .currentVersion(currentVersion)
-                                    .build();
+                   UpdateParameters params = new UpdateParameters.Builder(packageName)
+                                .source(source)
+                                .appTitle(appTitle)
+                                .currentVersion(currentVersion)
+                                .build();
 
-                       // Delegate to the new parameters-based overload
-                       requireVersion(requiredVersion, params);
-                 } catch (IOException e) {
-                       // Preserve legacy behavior: silently ignore failures to read package.json or related IO errors.
-                       return;
-                 }
+                   // Delegate to the new parameters-based overload
+                   requireVersion(requiredVersion, params);
           }
 
     /**
@@ -121,7 +121,7 @@ public class UpdateClient {
      * @param requiredVersion the required version string
      * @param params parameters describing the application (packageName is required)
      */
-    public void requireVersion(String requiredVersion, UpdateParameters params) {
+    public void requireVersion(String requiredVersion, UpdateParameters params) throws IOException {
         if (requiredVersion == null || requiredVersion.isEmpty()) {
             return;
         }
@@ -158,39 +158,35 @@ public class UpdateClient {
         String source = params.getSource() == null ? "" : params.getSource();
         String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
 
-        try {
-            // Early preferences gating using helper
-            if (shouldSkipPrompt(packageName, source, requiredVersion)) {
-                return;
-            }
 
-            // Fetch latest version (network)
-            String latestVersion = findLatestVersion(packageName, source, isPrerelease);
-
-            // If user chose to ignore this specific latest version previously, skip prompting
-            String ignoredVersion = getIgnoredVersion(packageName, source);
-            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
-                return;
-            }
-
-            UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion, source);
-
-            if (decision == UpdateDecision.IGNORE) {
-                // Persist ignored version so we don't prompt again for this exact version
-                setIgnoredVersion(packageName, source, latestVersion);
-                return;
-            } else if (decision == UpdateDecision.LATER) {
-                long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
-                setDeferUntil(packageName, source, until);
-                return;
-            } else {
-                // UPDATE_NOW - proceed to download & run installer for latestVersion
-                String installer = downloadInstaller(packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
-                runInstaller(installer);
-            }
-        } catch (IOException e) {
-            // On any IO error, silently ignore update attempt
+        // Early preferences gating using helper
+        if (shouldSkipPrompt(packageName, source, requiredVersion)) {
             return;
+        }
+
+        // Fetch latest version (network)
+        String latestVersion = findLatestVersion(packageName, source, isPrerelease);
+
+        // If user chose to ignore this specific latest version previously, skip prompting
+        String ignoredVersion = getIgnoredVersion(packageName, source);
+        if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
+            return;
+        }
+
+        UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion, source);
+
+        if (decision == UpdateDecision.IGNORE) {
+            // Persist ignored version so we don't prompt again for this exact version
+            setIgnoredVersion(packageName, source, latestVersion);
+            return;
+        } else if (decision == UpdateDecision.LATER) {
+            long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
+            setDeferUntil(packageName, source, until);
+            return;
+        } else {
+            // UPDATE_NOW - proceed to download & run installer for latestVersion
+            String installer = downloadInstaller(packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
+            runInstaller(installer);
         }
     }
 
@@ -491,81 +487,193 @@ public class UpdateClient {
     }
 
     private void runInstaller(String installerPath) {
-        if (installerPath == null || installerPath.isEmpty()) {
-            System.err.println("runInstaller: installerPath is null or empty");
-            return;
-        }
-
-        File installer = new File(installerPath);
-        if (!installer.exists()) {
-            System.err.println("runInstaller: installer not found: " + installerPath);
-            return;
-        }
-
-        // Best-effort: make executable on Unix-like systems
-        try {
-            if (!installer.canExecute()) {
-                installer.setExecutable(true);
+            if (installerPath == null || installerPath.isEmpty()) {
+                    System.err.println("runInstaller: installerPath is null or empty");
+                    return;
             }
-        } catch (Exception ignored) {
-        }
 
-        String os = System.getProperty("os.name").toLowerCase();
-        Process launchedProcess = null;
+            File installer = new File(installerPath);
+            if (!installer.exists()) {
+                    System.err.println("runInstaller: installer not found: " + installerPath);
+                    return;
+            }
 
-        try {
-            if (os.contains("mac")) {
-                // Use 'open' for macOS (works for .dmg, .pkg, .app bundles, etc.)
-                ProcessBuilder pb = new ProcessBuilder("open", installerPath);
-                pb.inheritIO();
-                launchedProcess = pb.start();
-            } else if (os.contains("win")) {
-                // Use cmd /c start "" <path> to launch non-blocking on Windows
-                // The empty string "" is the window title argument for start
-                ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "", installerPath);
-                // Do not inheritIO for cmd start; it will detach the process
-                launchedProcess = pb.start();
-            } else {
-                // Assume Linux/other Unix-like
-                try {
-                    // Try to open with xdg-open first (desktop-friendly)
-                    ProcessBuilder pb = new ProcessBuilder("xdg-open", installerPath);
-                    pb.inheritIO();
-                    launchedProcess = pb.start();
-                } catch (IOException xdgEx) {
-                    // If xdg-open isn't available, and the file is executable, run it directly
-                    if (installer.canExecute()) {
-                        try {
-                            ProcessBuilder pb2 = new ProcessBuilder(installerPath);
-                            pb2.inheritIO();
-                            launchedProcess = pb2.start();
-                        } catch (IOException execEx) {
-                            System.err.println("runInstaller: failed to execute installer directly: " + execEx.getMessage());
-                            execEx.printStackTrace();
-                        }
-                    } else {
-                        System.err.println("runInstaller: xdg-open failed and installer is not executable: " + installerPath);
+            // Best-effort: make executable on Unix-like systems
+            try {
+                    if (!installer.canExecute()) {
+                            installer.setExecutable(true);
                     }
-                }
+            } catch (Exception ignored) {
             }
 
-            if (launchedProcess != null) {
-                System.out.println("runInstaller: Launched installer: " + installerPath);
-                // Do not wait for installer to finish; exit the JVM to allow installer to replace files
-                try {
-                    System.exit(0);
-                } catch (SecurityException se) {
-                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-                }
-            } else {
-                System.err.println("runInstaller: Failed to launch installer: " + installerPath);
+            String os = System.getProperty("os.name").toLowerCase();
+            Process launchedProcess = null;
+
+            try {
+                    if (os.contains("mac") || os.contains("darwin")) {
+                            // If the download is a .tar.gz/.tgz, extract it and look for an .app bundle to open.
+                            String lower = installerPath.toLowerCase();
+                            if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) {
+                                    Path extractionDir;
+                                    try {
+                                            extractionDir = extractTarGzToTemp(installerPath);
+                                    } catch (IOException e) {
+                                            System.err.println("runInstaller: failed to extract archive: " + e.getMessage());
+                                            e.printStackTrace();
+                                            return;
+                                    }
+
+                                    Path appBundle = findFirstAppBundle(extractionDir);
+                                    if (appBundle == null) {
+                                            System.err.println("runInstaller: no .app bundle found inside extracted archive: " + extractionDir);
+                                            return;
+                                    }
+
+                                    try {
+                                            ProcessBuilder pb = new ProcessBuilder("open", appBundle.toString());
+                                            // Do not inherit IO — detach the launched app
+                                            launchedProcess = pb.start();
+                                            System.out.println("runInstaller: Launched .app bundle: " + appBundle);
+                                            // Exit to allow installer/app to proceed unencumbered
+                                            try {
+                                                    System.exit(0);
+                                            } catch (SecurityException se) {
+                                                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
+                                            }
+                                    } catch (IOException e) {
+                                            System.err.println("runInstaller: IOException while launching .app bundle: " + e.getMessage());
+                                            e.printStackTrace();
+                                    }
+                                    return;
+                            } else {
+                                    // Non-archive macOS installers: use 'open' directly
+                                    ProcessBuilder pb = new ProcessBuilder("open", installerPath);
+                                    pb.inheritIO();
+                                    launchedProcess = pb.start();
+                            }
+                    } else if (os.contains("win")) {
+                            // Use cmd /c start "" <path> to launch non-blocking on Windows
+                            // The empty string "" is the window title argument for start
+                            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "", installerPath);
+                            // Do not inheritIO for cmd start; it will detach the process
+                            launchedProcess = pb.start();
+                    } else {
+                            // Assume Linux/other Unix-like
+                            try {
+                                    // Try to open with xdg-open first (desktop-friendly)
+                                    ProcessBuilder pb = new ProcessBuilder("xdg-open", installerPath);
+                                    pb.inheritIO();
+                                    launchedProcess = pb.start();
+                            } catch (IOException xdgEx) {
+                                    // If xdg-open isn't available, and the file is executable, run it directly
+                                    if (installer.canExecute()) {
+                                            try {
+                                                    ProcessBuilder pb2 = new ProcessBuilder(installerPath);
+                                                    pb2.inheritIO();
+                                                    launchedProcess = pb2.start();
+                                            } catch (IOException execEx) {
+                                                    System.err.println("runInstaller: failed to execute installer directly: " + execEx.getMessage());
+                                                    execEx.printStackTrace();
+                                            }
+                                    } else {
+                                            System.err.println("runInstaller: xdg-open failed and installer is not executable: " + installerPath);
+                                    }
+                            }
+                    }
+
+                    if (launchedProcess != null) {
+                            System.out.println("runInstaller: Launched installer: " + installerPath);
+                            // Do not wait for installer to finish; exit the JVM to allow installer to replace files
+                            try {
+                                    System.exit(0);
+                            } catch (SecurityException se) {
+                                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
+                            }
+                    } else {
+                            System.err.println("runInstaller: Failed to launch installer: " + installerPath);
+                    }
+            } catch (IOException e) {
+                    System.err.println("runInstaller: IOException while launching installer: " + e.getMessage());
+                    e.printStackTrace();
             }
-        } catch (IOException e) {
-            System.err.println("runInstaller: IOException while launching installer: " + e.getMessage());
-            e.printStackTrace();
-        }
     }
 
+
+    /**
+     * Extracts a .tar.gz or .tgz archive to a temporary directory using the system 'tar' command.
+     * Returns the path to the created temporary directory containing the extracted archive.
+     *
+     * @param archivePath Path to the .tar.gz or .tgz archive
+     * @return Path to the temporary extraction directory
+     * @throws IOException if extraction fails
+     */
+    private Path extractTarGzToTemp(String archivePath) throws IOException {
+        Path tempDir = Files.createTempDirectory("jdeploy-installer-");
+        ProcessBuilder pb = new ProcessBuilder("tar", "-xzf", archivePath, "-C", tempDir.toString());
+        // Merge stdout and stderr so we capture any error messages
+        pb.redirectErrorStream(true);
+
+        Process p = null;
+        String output = "";
+        try {
+            p = pb.start();
+            // Capture output while waiting
+            output = readStreamToString(p.getInputStream());
+            boolean finished;
+            try {
+                finished = p.waitFor(60, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while extracting archive", ie);
+            }
+            if (!finished) {
+                p.destroyForcibly();
+                throw new IOException("tar extraction timed out");
+            }
+            if (p.exitValue() != 0) {
+                throw new IOException("tar extraction failed (exit " + p.exitValue() + "): " + output);
+            }
+        } catch (IOException e) {
+            // Attempt to delete tempDir on failure (best-effort)
+            try {
+                Files.walk(tempDir)
+                        .sorted((a, b) -> b.compareTo(a))
+                        .forEach(pth -> {
+                            try {
+                                Files.deleteIfExists(pth);
+                            } catch (IOException ignored) {
+                            }
+                        });
+            } catch (IOException ignored) {
+            }
+            throw new IOException("Failed to extract archive: " + e.getMessage() + " output: " + output, e);
+        }
+
+        return tempDir;
+    }
+
+    /**
+     * Recursively searches for the first directory ending with '.app' under the given root directory.
+     * Returns the Path to the .app bundle directory, or null if none found.
+     *
+     * @param root Root directory to search
+     * @return Path to first .app bundle, or null if not found
+     */
+    private Path findFirstAppBundle(Path root) {
+        if (root == null) {
+            return null;
+        }
+        try (Stream<Path> stream = Files.walk(root)) {
+            Optional<Path> found = stream
+                    .filter(Files::isDirectory)
+                    .filter(p -> p.getFileName() != null && p.getFileName().toString().toLowerCase().endsWith(".app"))
+                    .findFirst();
+            return found.orElse(null);
+        } catch (IOException e) {
+            System.err.println("findFirstAppBundle: IO error while searching for .app: " + e.getMessage());
+            return null;
+        }
+    }
 
     private Path findCurrentJarPath() throws IOException {
         String path = UpdateClient.class.getProtectionDomain().getCodeSource().getLocation().getPath();
