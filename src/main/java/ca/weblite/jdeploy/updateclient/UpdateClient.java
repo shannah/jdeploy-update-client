@@ -19,6 +19,8 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.prefs.Preferences;
 import java.util.regex.Matcher;
@@ -68,89 +70,206 @@ public class UpdateClient {
   }
 
   /**
-   * Overload of requireVersion that accepts an UpdateParameters instance so callers can perform
-   * update checks without needing a local package.json or file system access.
+   * Asynchronous version of requireVersion. Returns a CompletableFuture that completes with an
+   * UpdateResult describing the outcome of the check. If the user chose "Update Now", the
+   * returned UpdateResult will have isRequired()==true and callers can invoke {@link
+   * UpdateResult#launchInstaller()} to download and run the installer.
    *
-   * <p>Legacy semantics are preserved with two important differences: - The system property {@code
-   * jdeploy.app.version} MUST be present for any update check to proceed. If it is missing or
-   * empty, this method returns immediately (no prompts, no network). - The version used for
-   * comparisons is taken from {@code jdeploy.launcher.app.version}. If that property is missing or
-   * empty it defaults to {@code "0.0.0"}. The {@link UpdateParameters#getCurrentVersion()} value is
-   * ignored for comparison purposes.
+   * The method preserves previous gating semantics (jdeploy.app.version must be set, launcher
+   * version is used for comparisons, preferences are consulted for ignore/defer).
+   *
+   * Any IO errors will complete the future exceptionally with an IOException.
+   *
+   * @param requiredVersion the required version string
+   * @param params parameters describing the application (packageName is required)
+   * @return CompletableFuture completing with UpdateResult
+   */
+  public CompletableFuture<UpdateResult> requireVersionAsync(
+      final String requiredVersion, final UpdateParameters params) {
+    return CompletableFuture.supplyAsync(
+        () -> {
+          try {
+            if (requiredVersion == null || requiredVersion.isEmpty()) {
+              return new UpdateResult(this, null, null, null, null, false);
+            }
+            if (params == null) {
+              throw new IllegalArgumentException("params must not be null");
+            }
+
+            // Prerequisite: the app must be running under the jdeploy launcher.
+            // If jdeploy.app.version is not set, do not perform update checks.
+            String appVersionProperty = System.getProperty("jdeploy.app.version");
+            if (appVersionProperty == null || appVersionProperty.isEmpty()) {
+              // Not running via jdeploy launcher; preserve legacy behaviour by doing nothing.
+              return new UpdateResult(this, params.getPackageName(), params.getSource(), null,
+                  requiredVersion, false);
+            }
+
+            // Use the launcher's reported app version for comparisons. Default to "0.0.0" if missing.
+            String launcherVersion = System.getProperty("jdeploy.launcher.app.version");
+            if (launcherVersion == null || launcherVersion.isEmpty()) {
+              launcherVersion = "0.0.0";
+            }
+
+            // Use launcherVersion as the canonical currentVersion for later logic and UI.
+            String currentVersion = launcherVersion;
+
+            // Legacy semantics adjusted to use launcherVersion:
+            // - If the launcherVersion is a branch version, or already >= requiredVersion, return early.
+            if (isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
+              return new UpdateResult(this, params.getPackageName(), params.getSource(), currentVersion,
+                  requiredVersion, false);
+            }
+
+            boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
+
+            String packageName = params.getPackageName();
+            String source = params.getSource() == null ? "" : params.getSource();
+            String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
+
+            // Early preferences gating using helper
+            if (shouldSkipPrompt(packageName, source, requiredVersion)) {
+              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false);
+            }
+
+            // Fetch latest version (network)
+            String latestVersion = findLatestVersion(packageName, source, isPrerelease);
+
+            // If user chose to ignore this specific latest version previously, skip prompting
+            String ignoredVersion = getIgnoredVersion(packageName, source);
+            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
+              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
+            }
+
+            UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion);
+
+            if (decision == UpdateDecision.IGNORE) {
+              // Persist ignored version so we don't prompt again for this exact version
+              setIgnoredVersion(packageName, source, latestVersion);
+              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
+            } else if (decision == UpdateDecision.LATER) {
+              long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
+              setDeferUntil(packageName, source, until);
+              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
+            } else {
+              // UPDATE_NOW - return an UpdateResult that can launch the installer upon caller's request
+              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, true, latestVersion);
+            }
+          } catch (IOException e) {
+            throw new CompletionException(e);
+          }
+        });
+  }
+
+  /**
+   * Legacy synchronous overload preserved for compatibility. Delegates to {@link
+   * #requireVersionAsync(String, UpdateParameters)} and blocks until the check completes. If the
+   * returned UpdateResult indicates an update was chosen, launches the installer and then attempts
+   * to call System.exit(0) to preserve legacy behavior.
    *
    * @param requiredVersion the required version string
    * @param params parameters describing the application (packageName is required)
    */
   public void requireVersion(String requiredVersion, UpdateParameters params) throws IOException {
-    if (requiredVersion == null || requiredVersion.isEmpty()) {
-      return;
+    try {
+      UpdateResult res = requireVersionAsync(requiredVersion, params).get();
+      if (res != null && res.isRequired()) {
+        // Launch the installer. This method may throw IOException which we propagate.
+        res.launchInstaller();
+        // Preserve legacy behavior: try to exit after launching installer.
+        try {
+          System.exit(0);
+        } catch (SecurityException se) {
+          System.err.println("requireVersion: unable to exit JVM after launching installer: " + se.getMessage());
+        }
+      }
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted while waiting for update check", ie);
+    } catch (java.util.concurrent.ExecutionException ee) {
+      Throwable cause = ee.getCause();
+      if (cause instanceof IOException) {
+        throw (IOException) cause;
+      }
+      throw new IOException("Failed to perform update check", ee);
     }
-    if (params == null) {
-      throw new IllegalArgumentException("params must not be null");
-    }
+  }
 
-    // Prerequisite: the app must be running under the jdeploy launcher.
-    // If jdeploy.app.version is not set, do not perform update checks.
-    String appVersionProperty = System.getProperty("jdeploy.app.version");
-    if (appVersionProperty == null || appVersionProperty.isEmpty()) {
-      // Not running via jdeploy launcher; preserve legacy behaviour by doing nothing.
-      return;
-    }
+  /**
+   * Holds the outcome of an update check. If {@code required} is true then the caller may invoke
+   * {@link #launchInstaller()} to download and execute the installer. {@link #launchInstaller()}
+   * will perform the download and attempt to start the installer but will NOT call System.exit().
+   */
+  public static class UpdateResult {
+    private final UpdateClient owner;
+    private final String packageName;
+    private final String source;
+    private final String currentVersion;
+    private final String requiredVersion;
+    private final String latestVersion;
+    private final boolean required;
 
-    // Use the launcher's reported app version for comparisons. Default to "0.0.0" if missing.
-    String launcherVersion = System.getProperty("jdeploy.launcher.app.version");
-    if (launcherVersion == null || launcherVersion.isEmpty()) {
-      launcherVersion = "0.0.0";
-    }
-
-    // Use launcherVersion as the canonical currentVersion for later logic and UI.
-    String currentVersion = launcherVersion;
-
-    // Legacy semantics adjusted to use launcherVersion:
-    // - If the launcherVersion is a branch version, or already >= requiredVersion, return early.
-    if (isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
-      return;
-    }
-
-    boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
-
-    String packageName = params.getPackageName();
-    String source = params.getSource() == null ? "" : params.getSource();
-    String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
-
-    // Early preferences gating using helper
-    if (shouldSkipPrompt(packageName, source, requiredVersion)) {
-      return;
-    }
-
-    // Fetch latest version (network)
-    String latestVersion = findLatestVersion(packageName, source, isPrerelease);
-
-    // If user chose to ignore this specific latest version previously, skip prompting
-    String ignoredVersion = getIgnoredVersion(packageName, source);
-    if (ignoredVersion != null
-        && !ignoredVersion.isEmpty()
-        && ignoredVersion.equals(latestVersion)) {
-      return;
+    UpdateResult(UpdateClient owner, String packageName, String source, String currentVersion,
+        String requiredVersion, boolean required) {
+      this(owner, packageName, source, currentVersion, requiredVersion, required, null);
     }
 
-    UpdateDecision decision =
-        promptForUpdate(packageName, appTitle, currentVersion, requiredVersion);
+    UpdateResult(UpdateClient owner, String packageName, String source, String currentVersion,
+        String requiredVersion, boolean required, String latestVersion) {
+      this.owner = owner;
+      this.packageName = packageName;
+      this.source = source;
+      this.currentVersion = currentVersion;
+      this.requiredVersion = requiredVersion;
+      this.required = required;
+      this.latestVersion = latestVersion;
+    }
 
-    if (decision == UpdateDecision.IGNORE) {
-      // Persist ignored version so we don't prompt again for this exact version
-      setIgnoredVersion(packageName, source, latestVersion);
-      return;
-    } else if (decision == UpdateDecision.LATER) {
-      long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
-      setDeferUntil(packageName, source, until);
-      return;
-    } else {
-      // UPDATE_NOW - proceed to download & run installer for latestVersion
-      String installer =
-          downloadInstaller(
-              packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
-      runInstaller(installer);
+    public boolean isRequired() {
+      return required;
+    }
+
+    /**
+     * Downloads and runs the installer for the update. Throws IOException on failures to download
+     * the installer. This method does not call System.exit(); callers who need legacy behavior
+     * should call System.exit(0) after invoking this method.
+     */
+    public void launchInstaller() throws IOException {
+      if (!required) {
+        return;
+      }
+      if (owner == null) {
+        throw new IOException("Owner UpdateClient not available to perform install");
+      }
+      if (packageName == null || packageName.isEmpty()) {
+        throw new IOException("Package name not available for installer download");
+      }
+      if (latestVersion == null || latestVersion.isEmpty()) {
+        throw new IOException("Latest version not available for installer download");
+      }
+
+      String installer = owner.downloadInstaller(packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
+      owner.runInstaller(installer);
+    }
+
+    public String getPackageName() {
+      return packageName;
+    }
+
+    public String getSource() {
+      return source;
+    }
+
+    public String getCurrentVersion() {
+      return currentVersion;
+    }
+
+    public String getRequiredVersion() {
+      return requiredVersion;
+    }
+
+    public String getLatestVersion() {
+      return latestVersion;
     }
   }
 
@@ -451,8 +570,8 @@ public class UpdateClient {
    *
    * This method is best-effort: it logs actionable errors to stderr rather than throwing unchecked
    * exceptions from this method. Before launching it verifies the installer file exists. After a
-   * successful launch it attempts to call System.exit(0) to allow the installer to proceed
-   * independently; failure to exit (SecurityException) is logged but not rethrown.
+   * successful launch it does not attempt to call System.exit(0) — callers may choose to exit if
+   * desired.
    *
    * @param installerPath Full path to the downloaded installer file
    */
@@ -486,8 +605,6 @@ public class UpdateClient {
 
     String os = System.getProperty("os.name").toLowerCase();
     String lower = installerPath.toLowerCase();
-
-    Process launchedProcess = null;
 
     try {
       if (os.contains("mac") || os.contains("darwin")) {
@@ -537,14 +654,8 @@ public class UpdateClient {
 
           try {
             ProcessBuilder pb = new ProcessBuilder("open", appBundle.toString());
-            launchedProcess = pb.start();
+            pb.start();
             System.out.println("runInstaller: Launched .app bundle: " + appBundle);
-            try {
-              System.exit(0);
-            } catch (SecurityException se) {
-              System.err.println(
-                  "runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-            }
           } catch (IOException e) {
             System.err.println(
                 "runInstaller: IOException while launching .app bundle: " + e.getMessage());
@@ -557,14 +668,8 @@ public class UpdateClient {
         if (lower.endsWith(".app") || lower.endsWith(".pkg") || lower.endsWith(".dmg")) {
           try {
             ProcessBuilder pb = new ProcessBuilder("open", installerPath);
-            launchedProcess = pb.start();
+            pb.start();
             System.out.println("runInstaller: Opened macOS installer: " + installerPath);
-            try {
-              System.exit(0);
-            } catch (SecurityException se) {
-              System.err.println(
-                  "runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-            }
           } catch (IOException e) {
             System.err.println("runInstaller: failed to open macOS installer: " + e.getMessage());
             e.printStackTrace();
@@ -575,14 +680,8 @@ public class UpdateClient {
         // Fall back: attempt to open unknown types with 'open' (may hand off to Archive Utility)
         try {
           ProcessBuilder pb = new ProcessBuilder("open", installerPath);
-          launchedProcess = pb.start();
+          pb.start();
           System.out.println("runInstaller: Opened macOS file with 'open': " + installerPath);
-          try {
-            System.exit(0);
-          } catch (SecurityException se) {
-            System.err.println(
-                "runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-          }
         } catch (IOException e) {
           System.err.println("runInstaller: failed to open file on macOS: " + e.getMessage());
           e.printStackTrace();
@@ -592,14 +691,8 @@ public class UpdateClient {
         try {
           ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "", installerPath);
           // Do not inheritIO for cmd start; it will detach the process
-          launchedProcess = pb.start();
+          pb.start();
           System.out.println("runInstaller: Launched installer on Windows: " + installerPath);
-          try {
-            System.exit(0);
-          } catch (SecurityException se) {
-            System.err.println(
-                "runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-          }
         } catch (IOException e) {
           System.err.println(
               "runInstaller: failed to launch installer on Windows: " + e.getMessage());
@@ -638,14 +731,8 @@ public class UpdateClient {
           try {
             ProcessBuilder pb = new ProcessBuilder(decompressed.toString());
             pb.inheritIO();
-            launchedProcess = pb.start();
+            pb.start();
             System.out.println("runInstaller: Launched decompressed installer: " + decompressed);
-            try {
-              System.exit(0);
-            } catch (SecurityException se) {
-              System.err.println(
-                  "runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-            }
           } catch (IOException e) {
             System.err.println(
                 "runInstaller: failed to execute decompressed installer: " + e.getMessage());
@@ -658,29 +745,16 @@ public class UpdateClient {
         try {
           ProcessBuilder pb = new ProcessBuilder("xdg-open", installerPath);
           pb.inheritIO();
-          launchedProcess = pb.start();
+          pb.start();
           System.out.println("runInstaller: Launched installer via xdg-open: " + installerPath);
-          try {
-            System.exit(0);
-          } catch (SecurityException se) {
-            System.err.println(
-                "runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-          }
         } catch (IOException xdgEx) {
           // xdg-open not available or failed; if file is executable, try to run it
           if (installer.canExecute()) {
             try {
               ProcessBuilder pb2 = new ProcessBuilder(installerPath);
               pb2.inheritIO();
-              launchedProcess = pb2.start();
+              pb2.start();
               System.out.println("runInstaller: Launched executable installer: " + installerPath);
-              try {
-                System.exit(0);
-              } catch (SecurityException se) {
-                System.err.println(
-                    "runInstaller: unable to exit JVM after launching installer: "
-                        + se.getMessage());
-              }
             } catch (IOException execEx) {
               System.err.println(
                   "runInstaller: failed to execute installer directly: " + execEx.getMessage());
@@ -691,12 +765,6 @@ public class UpdateClient {
                 "runInstaller: xdg-open failed and installer is not executable: " + installerPath);
           }
         }
-      }
-
-      if (launchedProcess != null) {
-        System.out.println("runInstaller: Launched installer: " + installerPath);
-      } else {
-        System.err.println("runInstaller: Failed to launch installer: " + installerPath);
       }
     } catch (Exception e) {
       System.err.println(
