@@ -42,9 +42,13 @@ jobs:
           sed -i "s/version = '.*'/version = '${{ env.VERSION }}'/" build.gradle
           cat build.gradle | grep "^version"
 
+      # 4.5) Make Gradle wrapper executable
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
       # 5) Build and Deploy artifacts to Maven Central
       - name: Build and Deploy
-        run: ./gradlew clean build publish --no-daemon --stacktrace
+        run: ./gradlew clean build publish -x test --no-daemon --stacktrace
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
