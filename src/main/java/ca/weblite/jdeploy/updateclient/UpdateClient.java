@@ -19,12 +19,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.prefs.Preferences;
 import java.util.stream.Stream;
+import java.util.zip.GZIPInputStream;
 
 /**
  * Client for checking and installing application updates.
@@ -486,116 +491,127 @@ public class UpdateClient {
         }
     }
 
+    /**
+                * Attempts to run the installer at the provided path. Platform-specific behavior:
+                * - macOS: handles .tar.gz/.tgz by extracting and opening the contained .app bundle (uses `open`)
+                * - Windows: launches via `cmd /c start "" <installer>` to detach
+                * - Linux/Unix: if the file is a .gz, decompress to a sibling file (remove .gz suffix or append .bin),
+                *   make it executable (chmod 0755), launch it detached via ProcessBuilder, and then exit the JVM.
+                *
+                * This method is best-effort and will log errors to stderr rather than throwing.
+                *
+                * @param installerPath Full path to the downloaded installer file
+                */
     private void runInstaller(String installerPath) {
-            if (installerPath == null || installerPath.isEmpty()) {
-                    System.err.println("runInstaller: installerPath is null or empty");
-                    return;
-            }
+                                                    if (installerPath == null || installerPath.isEmpty()) {
+                                                                                                    System.err.println("runInstaller: installerPath is null or empty");
+                                                                                                    return;
+                                                    }
 
-            File installer = new File(installerPath);
-            if (!installer.exists()) {
-                    System.err.println("runInstaller: installer not found: " + installerPath);
-                    return;
-            }
+                                                    File installer = new File(installerPath);
+                                                    if (!installer.exists()) {
+                                                                                                    System.err.println("runInstaller: installer not found: " + installerPath);
+                                                                                                    return;
+                                                    }
 
-            // Best-effort: make executable on Unix-like systems
-            try {
-                    if (!installer.canExecute()) {
-                            installer.setExecutable(true);
-                    }
-            } catch (Exception ignored) {
-            }
+                                                    // Best-effort: make executable on Unix-like systems
+                                                    try {
+                                                                                                    if (!installer.canExecute()) {
+                                                                                                                                                    installer.setExecutable(true);
+                                                                                                    }
+                                                    } catch (Exception ignored) {
+                                                    }
 
-            String os = System.getProperty("os.name").toLowerCase();
-            Process launchedProcess = null;
+                                                    String os = System.getProperty("os.name").toLowerCase();
+                                                    Process launchedProcess = null;
 
-            try {
-                    if (os.contains("mac") || os.contains("darwin")) {
-                            // If the download is a .tar.gz/.tgz, extract it and look for an .app bundle to open.
-                            String lower = installerPath.toLowerCase();
-                            if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) {
-                                    Path extractionDir;
-                                    try {
-                                            extractionDir = extractTarGzToTemp(installerPath);
-                                    } catch (IOException e) {
-                                            System.err.println("runInstaller: failed to extract archive: " + e.getMessage());
-                                            e.printStackTrace();
-                                            return;
-                                    }
+                                                    try {
+                                                                                                    if (os.contains("mac") || os.contains("darwin")) {
+                                                                                                                                                    // If the download is a .tar.gz/.tgz, extract it and look for an .app bundle to open.
+                                                                                                                                                    String lower = installerPath.toLowerCase();
+                                                                                                                                                    if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) {
+                                                                                                                                                                                                    Path extractionDir;
+                                                                                                                                                                                                    try {
+                                                                                                                                                                                                                                                    extractionDir = extractTarGzToTemp(installerPath);
+                                                                                                                                                                                                    } catch (IOException e) {
+                                                                                                                                                                                                                                                    System.err.println("runInstaller: failed to extract archive: " + e.getMessage());
+                                                                                                                                                                                                                                                    e.printStackTrace();
+                                                                                                                                                                                                                                                    return;
+                                                                                                                                                                                                    }
 
-                                    Path appBundle = findFirstAppBundle(extractionDir);
-                                    if (appBundle == null) {
-                                            System.err.println("runInstaller: no .app bundle found inside extracted archive: " + extractionDir);
-                                            return;
-                                    }
+                                                                                                                                                                                                    Path appBundle = findFirstAppBundle(extractionDir);
+                                                                                                                                                                                                    if (appBundle == null) {
+                                                                                                                                                                                                                                                    System.err.println("runInstaller: no .app bundle found inside extracted archive: " + extractionDir);
+                                                                                                                                                                                                                                                    return;
+                                                                                                                                                                                                    }
 
-                                    try {
-                                            ProcessBuilder pb = new ProcessBuilder("open", appBundle.toString());
-                                            // Do not inherit IO — detach the launched app
-                                            launchedProcess = pb.start();
-                                            System.out.println("runInstaller: Launched .app bundle: " + appBundle);
-                                            // Exit to allow installer/app to proceed unencumbered
-                                            try {
-                                                    System.exit(0);
-                                            } catch (SecurityException se) {
-                                                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-                                            }
-                                    } catch (IOException e) {
-                                            System.err.println("runInstaller: IOException while launching .app bundle: " + e.getMessage());
-                                            e.printStackTrace();
-                                    }
-                                    return;
-                            } else {
-                                    // Non-archive macOS installers: use 'open' directly
-                                    ProcessBuilder pb = new ProcessBuilder("open", installerPath);
-                                    pb.inheritIO();
-                                    launchedProcess = pb.start();
-                            }
-                    } else if (os.contains("win")) {
-                            // Use cmd /c start "" <path> to launch non-blocking on Windows
-                            // The empty string "" is the window title argument for start
-                            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "", installerPath);
-                            // Do not inheritIO for cmd start; it will detach the process
-                            launchedProcess = pb.start();
-                    } else {
-                            // Assume Linux/other Unix-like
-                            try {
-                                    // Try to open with xdg-open first (desktop-friendly)
-                                    ProcessBuilder pb = new ProcessBuilder("xdg-open", installerPath);
-                                    pb.inheritIO();
-                                    launchedProcess = pb.start();
-                            } catch (IOException xdgEx) {
-                                    // If xdg-open isn't available, and the file is executable, run it directly
-                                    if (installer.canExecute()) {
-                                            try {
-                                                    ProcessBuilder pb2 = new ProcessBuilder(installerPath);
-                                                    pb2.inheritIO();
-                                                    launchedProcess = pb2.start();
-                                            } catch (IOException execEx) {
-                                                    System.err.println("runInstaller: failed to execute installer directly: " + execEx.getMessage());
-                                                    execEx.printStackTrace();
-                                            }
-                                    } else {
-                                            System.err.println("runInstaller: xdg-open failed and installer is not executable: " + installerPath);
-                                    }
-                            }
-                    }
+                                                                                                                                                                                                    try {
+                                                                                                                                                                                                                                                    ProcessBuilder pb = new ProcessBuilder("open", appBundle.toString());
+                                                                                                                                                                                                                                                    // Do not inherit IO — detach the launched app
+                                                                                                                                                                                                                                                    launchedProcess = pb.start();
+                                                                                                                                                                                                                                                    System.out.println("runInstaller: Launched .app bundle: " + appBundle);
+                                                                                                                                                                                                                                                    // Exit to allow installer/app to proceed unencumbered
+                                                                                                                                                                                                                                                    try {
+                                                                                                                                                                                                                                                                                                    System.exit(0);
+                                                                                                                                                                                                                                                    } catch (SecurityException se) {
+                                                                                                                                                                                                                                                                                                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
+                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                    } catch (IOException e) {
+                                                                                                                                                                                                                                                    System.err.println("runInstaller: IOException while launching .app bundle: " + e.getMessage());
+                                                                                                                                                                                                                                                    e.printStackTrace();
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    return;
+                                                                                                                                                    } else {
+                                                                                                                                                                                                    // Non-archive macOS installers: use 'open' directly
+                                                                                                                                                                                                    ProcessBuilder pb = new ProcessBuilder("open", installerPath);
+                                                                                                                                                                                                    pb.inheritIO();
+                                                                                                                                                                                                    launchedProcess = pb.start();
+                                                                                                                                                    }
+                                                                                                    } else if (os.contains("win")) {
+                                                                                                                                                    // Use cmd /c start "" <path> to launch non-blocking on Windows
+                                                                                                                                                    // The empty string "" is the window title argument for start
+                                                                                                                                                    ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "", installerPath);
+                                                                                                                                                    // Do not inheritIO for cmd start; it will detach the process
+                                                                                                                                                    launchedProcess = pb.start();
+                                                                                                    } else {
+                                                                                                                                                    // Assume Linux/other Unix-like
+                                                                                                                                                    try {
+                                                                                                                                                                                                    // Try to open with xdg-open first (desktop-friendly)
+                                                                                                                                                                                                    ProcessBuilder pb = new ProcessBuilder("xdg-open", installerPath);
+                                                                                                                                                                                                    pb.inheritIO();
+                                                                                                                                                                                                    launchedProcess = pb.start();
+                                                                                                                                                    } catch (IOException xdgEx) {
+                                                                                                                                                                                                    // If xdg-open isn't available, and the file is executable, run it directly
+                                                                                                                                                                                                    if (installer.canExecute()) {
+                                                                                                                                                                                                                                                    try {
+                                                                                                                                                                                                                                                                                                    ProcessBuilder pb2 = new ProcessBuilder(installerPath);
+                                                                                                                                                                                                                                                                                                    pb2.inheritIO();
+                                                                                                                                                                                                                                                                                                    launchedProcess = pb2.start();
+                                                                                                                                                                                                                                                    } catch (IOException execEx) {
+                                                                                                                                                                                                                                                                                                    System.err.println("runInstaller: failed to execute installer directly: " + execEx.getMessage());
+                                                                                                                                                                                                                                                                                                    execEx.printStackTrace();
+                                                                                                                                                                                                                                                    }
+                                                                                                                                                                                                    } else {
+                                                                                                                                                                                                                                                    System.err.println("runInstaller: xdg-open failed and installer is not executable: " + installerPath);
+                                                                                                                                                                                                    }
+                                                                                                                                                    }
+                                                                                                    }
 
-                    if (launchedProcess != null) {
-                            System.out.println("runInstaller: Launched installer: " + installerPath);
-                            // Do not wait for installer to finish; exit the JVM to allow installer to replace files
-                            try {
-                                    System.exit(0);
-                            } catch (SecurityException se) {
-                                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
-                            }
-                    } else {
-                            System.err.println("runInstaller: Failed to launch installer: " + installerPath);
-                    }
-            } catch (IOException e) {
-                    System.err.println("runInstaller: IOException while launching installer: " + e.getMessage());
-                    e.printStackTrace();
-            }
+                                                                                                    if (launchedProcess != null) {
+                                                                                                                                                    System.out.println("runInstaller: Launched installer: " + installerPath);
+                                                                                                                                                    // Do not wait for installer to finish; exit the JVM to allow installer to replace files
+                                                                                                                                                    try {
+                                                                                                                                                                                                    System.exit(0);
+                                                                                                                                                    } catch (SecurityException se) {
+                                                                                                                                                                                                    System.err.println("runInstaller: unable to exit JVM after launching installer: " + se.getMessage());
+                                                                                                                                                    }
+                                                                                                    } else {
+                                                                                                                                                    System.err.println("runInstaller: Failed to launch installer: " + installerPath);
+                                                                                                    }
+                                                    } catch (IOException e) {
+                                                                                                    System.err.println("runInstaller: IOException while launching installer: " + e.getMessage());
+                                                                                                    e.printStackTrace();
+                                                    }
     }
 
 
@@ -653,26 +669,102 @@ public class UpdateClient {
     }
 
     /**
-     * Recursively searches for the first directory ending with '.app' under the given root directory.
-     * Returns the Path to the .app bundle directory, or null if none found.
-     *
-     * @param root Root directory to search
-     * @return Path to first .app bundle, or null if not found
-     */
+         * Recursively searches for the first directory ending with '.app' under the given root directory.
+         * Returns the Path to the .app bundle directory, or null if none found.
+         *
+         * @param root Root directory to search
+         * @return Path to first .app bundle, or null if not found
+         */
     private Path findFirstAppBundle(Path root) {
-        if (root == null) {
-            return null;
-        }
-        try (Stream<Path> stream = Files.walk(root)) {
-            Optional<Path> found = stream
-                    .filter(Files::isDirectory)
-                    .filter(p -> p.getFileName() != null && p.getFileName().toString().toLowerCase().endsWith(".app"))
-                    .findFirst();
-            return found.orElse(null);
-        } catch (IOException e) {
-            System.err.println("findFirstAppBundle: IO error while searching for .app: " + e.getMessage());
-            return null;
-        }
+                        if (root == null) {
+                                            return null;
+                        }
+                        try (Stream<Path> stream = Files.walk(root)) {
+                                            Optional<Path> found = stream
+                                                                                    .filter(Files::isDirectory)
+                                                                                    .filter(p -> p.getFileName() != null && p.getFileName().toString().toLowerCase().endsWith(".app"))
+                                                                                    .findFirst();
+                                            return found.orElse(null);
+                        } catch (IOException e) {
+                                            System.err.println("findFirstAppBundle: IO error while searching for .app: " + e.getMessage());
+                                            return null;
+                        }
+    }
+
+    /**
+         * Decompresses a .gz installer file to a sibling file (removes trailing .gz suffix when possible).
+         * Returns the path to the decompressed file.
+         *
+         * @param gzPath Path to the .gz file
+         * @return Path to decompressed file
+         * @throws IOException if decompression fails
+         */
+    private Path decompressGzipInstaller(Path gzPath) throws IOException {
+                        if (gzPath == null || !Files.exists(gzPath)) {
+                                            throw new IOException("Gzip installer not found: " + gzPath);
+                        }
+
+                        String filename = gzPath.getFileName().toString();
+                        String outName;
+                        if (filename.toLowerCase().endsWith(".gz")) {
+                                            outName = filename.substring(0, filename.length() - 3);
+                                            if (outName.isEmpty()) {
+                                                                outName = filename + ".bin";
+                                            }
+                        } else {
+                                            outName = filename + ".bin";
+                        }
+
+                        Path dest = gzPath.getParent().resolve(outName);
+
+                        try (InputStream fis = Files.newInputStream(gzPath);
+                                                 GZIPInputStream gis = new GZIPInputStream(fis);
+                                                 FileOutputStream fos = new FileOutputStream(dest.toFile())) {
+
+                                            byte[] buffer = new byte[8192];
+                                            int read;
+                                            while ((read = gis.read(buffer)) != -1) {
+                                                                fos.write(buffer, 0, read);
+                                            }
+                        } catch (IOException e) {
+                                            throw new IOException("Failed to decompress gzip installer: " + e.getMessage(), e);
+                        }
+
+                        return dest;
+    }
+
+    /**
+         * Ensures the given path is executable. Tries POSIX permission API first; if unavailable falls back to `chmod`.
+         *
+         * @param path Path to make executable
+         */
+    private void makeExecutable(Path path) {
+                        if (path == null) {
+                                            return;
+                        }
+                        try {
+                                            Set<PosixFilePermission> perms = new HashSet<>();
+                                            perms.add(PosixFilePermission.OWNER_READ);
+                                            perms.add(PosixFilePermission.OWNER_WRITE);
+                                            perms.add(PosixFilePermission.OWNER_EXECUTE);
+                                            perms.add(PosixFilePermission.GROUP_READ);
+                                            perms.add(PosixFilePermission.GROUP_EXECUTE);
+                                            perms.add(PosixFilePermission.OTHERS_READ);
+                                            perms.add(PosixFilePermission.OTHERS_EXECUTE);
+                                            Files.setPosixFilePermissions(path, perms);
+                        } catch (UnsupportedOperationException | IOException e) {
+                                            // Fallback to chmod if POSIX permissions not supported or failed
+                                            try {
+                                                                Process p = new ProcessBuilder("chmod", "0755", path.toString()).start();
+                                                                boolean finished = p.waitFor(10, TimeUnit.SECONDS);
+                                                                if (!finished) {
+                                                                                    p.destroyForcibly();
+                                                                                    System.err.println("makeExecutable: chmod timed out for: " + path);
+                                                                }
+                                            } catch (Exception ex) {
+                                                                System.err.println("makeExecutable: failed to make file executable: " + ex.getMessage());
+                                            }
+                        }
     }
 
     private Path findCurrentJarPath() throws IOException {
