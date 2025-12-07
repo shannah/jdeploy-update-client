@@ -1,6 +1,7 @@
 plugins {
     id 'java-library'
     id 'maven-publish'
+    id 'signing'
     // Use a Shadow plugin version compatible with a wider range of Gradle/JVM setups
     id 'com.github.johnrengelman.shadow' version '7.1.2'
     // Use a conservative Spotless version
@@ -10,7 +11,7 @@ plugins {
     id 'com.github.spotbugs' version '4.7.6'
 }
 
-group = 'ca.weblite.jdeploy'
+group = 'ca.weblite'
 version = '1.0.0-SNAPSHOT'
 
 repositories {
@@ -103,4 +104,80 @@ tasks.register('lint') {
     group = 'verification'
     description = 'Run formatting, style checks and static analysis (spotless, checkstyle, spotbugs)'
     dependsOn 'spotlessCheck', 'checkstyleMain', 'checkstyleTest', 'spotbugsMain', 'spotbugsTest'
+}
+
+// Enable javadoc and sources jars
+java {
+    withJavadocJar()
+    withSourcesJar()
+}
+
+// Maven Publishing Configuration
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            groupId = 'ca.weblite'
+            artifactId = 'jdeploy-update-client-swing'
+
+            // Publish the shadow jar instead of the regular jar
+            artifact shadowJar
+            artifact sourcesJar
+            artifact javadocJar
+
+            pom {
+                name = 'jDeploy Update Client Swing'
+                description = 'A Swing-based update client for jDeploy applications'
+                url = 'https://github.com/shannah/jdeploy-update-client'
+
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+
+                developers {
+                    developer {
+                        id = 'shannah'
+                        name = 'Steve Hannah'
+                        email = 'steve.hannah@weblite.ca'
+                    }
+                }
+
+                scm {
+                    connection = 'scm:git:git://github.com/shannah/jdeploy-update-client.git'
+                    developerConnection = 'scm:git:ssh://github.com/shannah/jdeploy-update-client.git'
+                    url = 'https://github.com/shannah/jdeploy-update-client'
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = 'central'
+            url = 'https://central.sonatype.com/api/v1/publisher/deployments/upload/'
+            credentials {
+                username = System.getenv('MAVEN_CENTRAL_USERNAME') ?: project.findProperty('mavenCentralUsername')
+                password = System.getenv('MAVEN_CENTRAL_PASSWORD') ?: project.findProperty('mavenCentralPassword')
+            }
+        }
+    }
+}
+
+// Signing configuration
+signing {
+    def signingKey = System.getenv('GPG_PRIVATE_KEY')
+    def signingPassword = System.getenv('GPG_PASSPHRASE')
+
+    if (signingKey && signingPassword) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+    }
+
+    sign publishing.publications.mavenJava
+}
+
+// Only sign if publishing
+tasks.withType(Sign) {
+    onlyIf { gradle.taskGraph.hasTask('publish') || gradle.taskGraph.hasTask('publishToMavenLocal') }
 }

@@ -1,0 +1,59 @@
+name: Build and Deploy to Maven Central
+
+on:
+  push:
+    tags:
+      - 'v*' # e.g. v1.0.0
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      # 1) Extract version from tag (v1.0.0 -> 1.0.0)
+      - name: Determine Release Version
+        run: |
+          # GITHUB_REF_NAME is something like "v1.0.0"
+          # Strip leading "v" to get "1.0.0"
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # 2) Set up JDK + GPG for signing
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # 3) Import GPG key for signing
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+
+      # 4) Update version in build.gradle
+      - name: Set Gradle project version
+        run: |
+          sed -i "s/version = '.*'/version = '${{ env.VERSION }}'/" build.gradle
+          cat build.gradle | grep "^version"
+
+      # 5) Build and Deploy artifacts to Maven Central
+      - name: Build and Deploy
+        run: ./gradlew clean build publish --no-daemon --stacktrace
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_PRIVATE_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_PASSPHRASE }}
+
+      # 6) Optional verification message
+      - name: Verify
+        if: always()
+        run: |
+          echo "Build completed. If successful, your artifacts should be staged and automatically released on Sonatype."
