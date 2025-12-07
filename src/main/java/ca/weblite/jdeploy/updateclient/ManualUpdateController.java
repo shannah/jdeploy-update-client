@@ -84,10 +84,20 @@ public final class ManualUpdateController {
       client.setPreferencesNodeName(projectCode);
     }
 
-    // Invoke the update check. If UpdateClient launches the installer successfully it may call
-    // System.exit(0)
-    // and the process will terminate. If this method returns, we show the Hello World window.
-    client.requireVersion(requiredVersion, params);
+    // Invoke the asynchronous update check. If an update is required, launch the installer and
+    // exit the JVM to simulate legacy behavior. Otherwise, continue running and show the window.
+    client.requireVersionAsync(requiredVersion, params)
+        .thenAccept(
+            result -> {
+              if (result != null && result.isRequired()) {
+                try {
+                  result.launchInstaller();
+                  System.exit(0);
+                } catch (IOException e) {
+                  e.printStackTrace();
+                }
+              }
+            });
 
     // Show a simple window so we can verify the run continued past the update check.
     SwingUtilities.invokeLater(

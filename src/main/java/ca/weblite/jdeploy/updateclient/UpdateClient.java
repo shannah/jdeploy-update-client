@@ -200,9 +200,38 @@ public class UpdateClient {
             }
 
             // At this point, we have a candidate latestVersion and the launcher is older than requiredVersion.
-            // Do NOT prompt the user, change preferences, or exit here. The caller can inspect the result
-            // and call UpdateResult.launchInstaller() if they wish to proceed.
-            return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, true, latestVersion);
+            // Prompt the user to decide whether to update now, later, or ignore this version.
+            // promptForUpdate handles headless mode and EDT invocation.
+            UpdateDecision decision =
+                promptForUpdate(packageName, params.getAppTitle(), currentVersion, requiredVersion);
+
+            switch (decision) {
+              case IGNORE:
+                // Persist the ignored version for this package+source and return not required.
+                setIgnoredVersion(packageName, source, requiredVersion);
+                return new UpdateResult(
+                    this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
+              case LATER:
+                // Defer prompts for DEFAULT_DEFER_DAYS days.
+                long until =
+                    System.currentTimeMillis()
+                        + java.util.concurrent.TimeUnit.DAYS.toMillis(DEFAULT_DEFER_DAYS);
+                setDeferUntil(packageName, source, until);
+                return new UpdateResult(
+                    this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
+              case UPDATE_NOW:
+                // Caller is responsible for launching the installer and exiting the JVM.
+                return new UpdateResult(
+                    this, packageName, source, currentVersion, requiredVersion, true, latestVersion);
+              default:
+                // Defensive: treat unknown result as defer (LATER)
+                long defUntil =
+                    System.currentTimeMillis()
+                        + java.util.concurrent.TimeUnit.DAYS.toMillis(DEFAULT_DEFER_DAYS);
+                setDeferUntil(packageName, source, defUntil);
+                return new UpdateResult(
+                    this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
+            }
           } catch (IOException e) {
             throw new CompletionException(e);
           }
