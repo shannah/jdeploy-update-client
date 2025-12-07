@@ -92,6 +92,8 @@ tasks.matching { it.name == 'spotbugsMain' || it.name == 'spotbugsTest' }.config
 shadowJar {
     relocate 'com.eclipsesource.json', 'ca.weblite.jdeploy.updateclient.shaded.json'
     archiveClassifier.set('')
+    // Ensure shadow JAR is built before signing/publishing
+    mustRunAfter jar
 }
 
 // Make build use shadowJar
@@ -129,13 +131,10 @@ publishing {
             groupId = 'ca.weblite'
             artifactId = 'jdeploy-update-client-swing'
 
-            // Publish the shadow jar as the main artifact
-            // This replaces the default JAR with the shadow JAR
-            artifact(shadowJar) {
-                classifier = null
-            }
-            artifact sourcesJar
-            artifact javadocJar
+            // Use shadow JAR as the main artifact
+            artifact(shadowJar)
+            artifact(sourcesJar)
+            artifact(javadocJar)
 
             pom {
                 name = 'jDeploy Update Client Swing'
@@ -186,4 +185,9 @@ signing {
     // Use GPG command for signing
     useGpgCmd()
     sign publishing.publications.mavenJava
+}
+
+// Ensure signing tasks run after build tasks
+tasks.withType(Sign) {
+    dependsOn shadowJar, sourcesJar, javadocJar
 }
