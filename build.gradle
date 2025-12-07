@@ -129,8 +129,11 @@ publishing {
             groupId = 'ca.weblite'
             artifactId = 'jdeploy-update-client-swing'
 
-            // Publish the shadow jar instead of the regular jar
-            artifact shadowJar
+            // Publish the shadow jar as the main artifact
+            // This replaces the default JAR with the shadow JAR
+            artifact(shadowJar) {
+                classifier = null
+            }
             artifact sourcesJar
             artifact javadocJar
 
@@ -177,17 +180,10 @@ publishing {
 
 // Signing configuration
 signing {
-    def signingKey = System.getenv('GPG_PRIVATE_KEY')
-    def signingPassword = System.getenv('GPG_PASSPHRASE')
+    // Required for signing artifacts
+    required { gradle.taskGraph.hasTask('publish') || gradle.taskGraph.hasTask('publishToMavenLocal') }
 
-    if (signingKey && signingPassword) {
-        useInMemoryPgpKeys(signingKey, signingPassword)
-    }
-
+    // Use GPG agent configured by setup-java action
+    useGpgCmd()
     sign publishing.publications.mavenJava
-}
-
-// Only sign if publishing
-tasks.withType(Sign) {
-    onlyIf { gradle.taskGraph.hasTask('publish') || gradle.taskGraph.hasTask('publishToMavenLocal') }
 }

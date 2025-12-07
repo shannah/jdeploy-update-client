@@ -21,20 +21,22 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
-      # 2) Set up JDK + GPG for signing
+      # 2) Set up JDK
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '11'
 
-      # 3) Import GPG key for signing
+      # 3) Import and configure GPG for signing
       - name: Import GPG key
         run: |
           echo "${{ secrets.GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          # List keys to verify
           gpg --list-secret-keys --keyid-format LONG
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          # Configure GPG to use passphrase from environment
+          echo "allow-preset-passphrase" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye || true
 
       # 4) Update version in build.gradle
       - name: Set Gradle project version
@@ -48,13 +50,14 @@ jobs:
 
       # 5) Build and Deploy artifacts to Maven Central
       - name: Build and Deploy
-        run: ./gradlew clean build publish -x test --no-daemon --stacktrace
+        run: |
+          # Configure GPG to be non-interactive
+          export GPG_TTY=$(tty)
+          ./gradlew clean build publish -x test --no-daemon --stacktrace
         env:
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          ORG_GRADLE_PROJECT_signing.gnupg.passphrase: ${{ secrets.GPG_PASSPHRASE }}
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_PRIVATE_KEY }}
-          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_PASSPHRASE }}
 
       # 6) Optional verification message
       - name: Verify
