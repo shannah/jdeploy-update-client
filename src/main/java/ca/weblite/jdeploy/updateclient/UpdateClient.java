@@ -151,26 +151,70 @@ public class UpdateClient {
   }
 
   /**
-   * Legacy synchronous overload preserved for compatibility. Delegates to {@link
-   * #requireVersionAsync(String, UpdateParameters)} and blocks until the check completes. If the
-   * returned UpdateResult indicates an update was chosen, launches the installer and then attempts
-   * to call System.exit(0) to preserve legacy behavior.
+   * Legacy synchronous overload preserved for compatibility.
+   *
+   * <p>Deprecated: prefer {@link #requireVersionAsync(String, UpdateParameters)} which returns an
+   * {@link java.util.concurrent.CompletableFuture} with an {@link UpdateResult} that callers can use
+   * to control installer launch and shutdown behavior.
+   *
+   * <p>This legacy method delegates to {@link #requireVersionAsync(String, UpdateParameters)},
+   * blocks for the result, and — if an update is required — prompts the user using the existing
+   * Swing prompt flow. If the user chooses:
+   * <ul>
+   *   <li>IGNORE: the ignored version is persisted</li>
+   *   <li>LATER: a defer-until timestamp DEFAULT_DEFER_DAYS into the future is persisted</li>
+   *   <li>UPDATE_NOW: the installer is launched and an attempt to call System.exit(0) is made to
+   *       preserve legacy behavior</li>
+   * </ul>
    *
    * @param requiredVersion the required version string
    * @param params parameters describing the application (packageName is required)
+   * @throws IOException if the async check or installer download fails
+   * @deprecated Use {@link #requireVersionAsync(String, UpdateParameters)} and {@link UpdateResult#launchInstaller()}
+   *     to decouple update checks from installer launch and JVM shutdown.
    */
+  @Deprecated
   public void requireVersion(String requiredVersion, UpdateParameters params) throws IOException {
     try {
+      // Block on the async check to preserve legacy synchronous behavior.
       UpdateResult res = requireVersionAsync(requiredVersion, params).get();
-      if (res != null && res.isRequired()) {
-        // Launch the installer. This method may throw IOException which we propagate.
-        res.launchInstaller();
-        // Preserve legacy behavior: try to exit after launching installer.
-        try {
-          System.exit(0);
-        } catch (SecurityException se) {
-          System.err.println("requireVersion: unable to exit JVM after launching installer: " + se.getMessage());
-        }
+
+      // If no update is required (includes preference gating), return early.
+      if (res == null || !res.isRequired()) {
+        return;
+      }
+
+      // Prepare prompt parameters
+      String packageName = params != null ? params.getPackageName() : null;
+      String source = (params != null && params.getSource() != null) ? params.getSource() : "";
+      String appTitle = params != null ? params.getAppTitle() : null;
+      String currentVersion = res.getCurrentVersion();
+
+      // Prompt the user and act on the decision.
+      UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion);
+
+      switch (decision) {
+        case IGNORE:
+          // Persist the ignored version for this package+source.
+          setIgnoredVersion(packageName, source, requiredVersion);
+          return;
+        case LATER:
+          // Defer prompts for DEFAULT_DEFER_DAYS days.
+          long until = System.currentTimeMillis() + java.util.concurrent.TimeUnit.DAYS.toMillis(DEFAULT_DEFER_DAYS);
+          setDeferUntil(packageName, source, until);
+          return;
+        case UPDATE_NOW:
+          // Launch installer, then attempt to exit to preserve legacy behavior.
+          res.launchInstaller();
+          try {
+            System.exit(0);
+          } catch (SecurityException se) {
+            System.err.println("requireVersion: unable to exit JVM after launching installer: " + se.getMessage());
+          }
+          return;
+        default:
+          // Defensive: treat unknown result as defer
+          return;
       }
     } catch (InterruptedException ie) {
       Thread.currentThread().interrupt();
