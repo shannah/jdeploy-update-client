@@ -35,9 +35,20 @@ import javax.swing.*;
  * <p>The updater exposes an async-first API for checking whether an application update is
  * required and for launching the installer. Callers are encouraged to use {@link
  * #requireVersionAsync(String, UpdateParameters)} which performs the check asynchronously and
- * returns an {@link UpdateResult} that the caller can inspect and act upon. This decouples the
- * network/IO-based check from installer launch and JVM shutdown so callers can perform cleanup
- * (for example, saving user data) before exiting the process.
+ * returns an {@link UpdateResult} that the caller can inspect and act upon. The returned future
+ * completes only after the update decision has been resolved: the user has been prompted and has
+ * selected one of the available choices (Update Now, Later, or Ignore). When running in a
+ * headless environment the prompt is skipped and a conservative default (defer/Later) is chosen so
+ * no UI is shown.
+ *
+ * <p>This design decouples the network/IO-based check from installer launch and JVM shutdown so
+ * callers can perform cleanup (for example, saving user data, flushing logs, releasing resources)
+ * before launching the installer and optionally exiting the process. If the user explicitly
+ * selects "Update Now", the returned {@link UpdateResult} will report {@code isRequired() == true}
+ * and callers may invoke {@link UpdateResult#launchInstaller()} to download and launch the
+ * installer. Important: {@link UpdateResult#launchInstaller()} does NOT call {@code
+ * System.exit(0)} — callers are responsible for performing any necessary cleanup and exiting the
+ * JVM if desired.
  *
  * <p>Supports one workflow:
  *
@@ -106,10 +117,20 @@ public class UpdateClient {
    *
    * <p>Returns a {@link java.util.concurrent.CompletableFuture} that completes with an {@link
    * UpdateResult} describing the outcome of the check. The returned {@link UpdateResult} will
-   * indicate whether an update is required via {@link UpdateResult#isRequired()}. If an update is
-   * required the caller may invoke {@link UpdateResult#launchInstaller()} to download and launch
-   * the installer. Importantly, {@link UpdateResult#launchInstaller()} does NOT call {@code
-   * System.exit(0)}; callers should perform any necessary cleanup and exit the JVM if desired.
+   * indicate whether an update is required via {@link UpdateResult#isRequired()}.
+   *
+   * <p>Behavioral note: the returned {@link CompletableFuture} completes only after the update
+   * decision has been resolved. In normal (non-headless) environments the user will be shown a UI
+   * prompt and must select one of the options: Update Now, Later, or Ignore. The future completes
+   * after the user makes that choice and the corresponding preference (ignore/defer) is persisted.
+   * When running in a headless environment the prompt is skipped and a conservative default (defer /
+   * Later) is used and the future completes immediately with the appropriate {@link UpdateResult}.
+   *
+   * <p>If the user selects "Update Now" then the returned {@link UpdateResult} will have {@code
+   * isRequired() == true}. Callers may then invoke {@link UpdateResult#launchInstaller()} to
+   * download and launch the installer. Important: {@link UpdateResult#launchInstaller()} does NOT
+   * call {@code System.exit(0)}; callers are responsible for performing any necessary cleanup and
+   * exiting the JVM if desired.
    *
    * <p>The method preserves previous gating semantics: {@code jdeploy.app.version} must be set for
    * checks to proceed, the launcher-reported version ({@code jdeploy.launcher.app.version}) is used
@@ -126,18 +147,25 @@ public class UpdateClient {
    *           if (result.isRequired()) {
    *               try {
    *                   result.launchInstaller();
-   *                   // perform cleanup here (save files, flush logs, etc.)
+   *                   // perform cleanup (save state, flush logs, etc.)
    *                   System.exit(0);
    *               } catch (IOException e) {
-   *                   // handle download/launch failure
+   *                   // handle download/launch failure as appropriate
    *               }
    *           }
    *           return result;
    *       });
    * </pre>
    *
-   * Note: {@link UpdateResult#launchInstaller()} does NOT call {@code System.exit(0)}.
-   * Callers are responsible for performing any necessary cleanup and exiting the JVM if desired.
+   * <p>Behavior summary:
+   * <ul>
+   *   <li>The returned future completes only after the user has been prompted (except in headless mode)
+   *       and has made a choice (Update Now, Later, or Ignore).</li>
+   *   <li>If the user chose Update Now then {@link UpdateResult#isRequired()} will be {@code true}
+   *       and callers may invoke {@link UpdateResult#launchInstaller()}.</li>
+   *   <li>{@link UpdateResult#launchInstaller()} does NOT call {@code System.exit(0)}; callers are
+   *       responsible for any cleanup and for exiting the JVM if desired.</li>
+   * </ul>
    *
    * @param requiredVersion the required version string
    * @param params parameters describing the application (packageName is required)
