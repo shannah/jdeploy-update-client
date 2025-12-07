@@ -272,37 +272,14 @@ public class UpdateClient {
         return;
       }
 
-      // Prepare prompt parameters
-      String packageName = params != null ? params.getPackageName() : null;
-      String source = (params != null && params.getSource() != null) ? params.getSource() : "";
-      String appTitle = params != null ? params.getAppTitle() : null;
-      String currentVersion = res.getCurrentVersion();
-
-      // Prompt the user and act on the decision.
-      UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion);
-
-      switch (decision) {
-        case IGNORE:
-          // Persist the ignored version for this package+source.
-          setIgnoredVersion(packageName, source, requiredVersion);
-          return;
-        case LATER:
-          // Defer prompts for DEFAULT_DEFER_DAYS days.
-          long until = System.currentTimeMillis() + java.util.concurrent.TimeUnit.DAYS.toMillis(DEFAULT_DEFER_DAYS);
-          setDeferUntil(packageName, source, until);
-          return;
-        case UPDATE_NOW:
-          // Launch installer, then attempt to exit to preserve legacy behavior.
-          res.launchInstaller();
-          try {
-            System.exit(0);
-          } catch (SecurityException se) {
-            System.err.println("requireVersion: unable to exit JVM after launching installer: " + se.getMessage());
-          }
-          return;
-        default:
-          // Defensive: treat unknown result as defer
-          return;
+      // For legacy synchronous behavior: if an update is required, launch the installer and
+      // attempt to exit the JVM. Preference persistence and prompting are handled by the async
+      // flow / callers; avoid duplicating prompts here.
+      res.launchInstaller();
+      try {
+        System.exit(0);
+      } catch (SecurityException se) {
+        System.err.println("requireVersion: unable to exit JVM after launching installer: " + se.getMessage());
       }
     } catch (InterruptedException ie) {
       Thread.currentThread().interrupt();
