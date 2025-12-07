@@ -1,0 +1,22 @@
+# EditorConfig is awesome: https://editorconfig.org
+root = true
+
+# Core file settings
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Default for all files
+[*]
+indent_style = space
+indent_size = 2
+
+# Java files: enforce spaces and indent size explicitly (2 spaces chosen; change to 4 if preferred)
+[*.java]
+indent_style = space
+indent_size = 2
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
