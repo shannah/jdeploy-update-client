@@ -79,7 +79,7 @@ import javax.swing.*;
  *
  * <p>Example usage (async-first, caller-controlled installer launch and JVM exit):
  *
- * <pre>
+ * <pre>{@code
  * // Preferred: check asynchronously, then if update required, launch the installer,
  * // do any required cleanup (save state, flush logs, etc.) and then exit.
  * client.requireVersionAsync("2.0.0", params)
@@ -95,7 +95,7 @@ import javax.swing.*;
  *           }
  *           return result;
  *       });
- * </pre>
+ * }</pre>
  *
  * <p>When using the async API the {@link UpdateResult#launchInstaller()} method does NOT call
  * {@code System.exit(0)}. Callers should perform any necessary cleanup and then exit the JVM if
@@ -142,7 +142,7 @@ public class UpdateClient {
    *
    * <p>Example usage showing an inline handler that launches the installer and then exits:
    *
-   * <pre>
+   * <pre>{@code
    * client.requireVersionAsync("2.0.0", params)
    *       .thenApply(result -> {
    *           if (result.isRequired()) {
@@ -156,7 +156,7 @@ public class UpdateClient {
    *           }
    *           return result;
    *       });
-   * </pre>
+   * }</pre>
    *
    * <p>Behavior summary:
    * <ul>
