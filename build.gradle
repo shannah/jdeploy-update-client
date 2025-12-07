@@ -185,12 +185,4 @@ tasks.withType(Sign) {
     dependsOn shadowJar, sourcesJar, javadocJar
 }
 
-// Configure Maven Central Portal publishing using nmcp plugin
-nmcp {
-    publishAllPublications {
-        username = System.getenv('MAVEN_CENTRAL_USERNAME') ?: project.findProperty('mavenCentralUsername')
-        password = System.getenv('MAVEN_CENTRAL_PASSWORD') ?: project.findProperty('mavenCentralPassword')
-        // Automatically publish after validation passes
-        publicationType = "AUTOMATIC"
-    }
-}
+// Maven Central Portal publishing will be configured via command-line parameters

@@ -58,10 +58,13 @@ jobs:
         run: |
           # Configure GPG to be non-interactive
           export GPG_TTY=$(tty)
-          ./gradlew clean build publishAllPublicationsToCentralPortal -x test --no-daemon --stacktrace \
+          ./gradlew clean build publishAllPublicationsToNmcpRepository -x test --no-daemon --stacktrace \
             -Psigning.gnupg.executable=gpg \
             -Psigning.gnupg.useLegacyGpg=false \
-            -Psigning.gnupg.passphrase="${{ secrets.GPG_PASSPHRASE }}"
+            -Psigning.gnupg.passphrase="${{ secrets.GPG_PASSPHRASE }}" \
+            -Pnmcp.username="${{ secrets.MAVEN_CENTRAL_USERNAME }}" \
+            -Pnmcp.password="${{ secrets.MAVEN_CENTRAL_PASSWORD }}" \
+            -Pnmcp.publicationType=AUTOMATIC
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
