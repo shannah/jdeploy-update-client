@@ -3,25 +3,40 @@ package ca.weblite.jdeploy.updateclient;
 /**
  * Parameters that describe an application for update checking.
  *
- * <p>This object is intended to replace reliance on a local package.json file
- * when requesting update checks. Provide the essential metadata the updater
- * needs:</p>
+ * <p>This immutable value object provides the application metadata required by
+ * {@link UpdateClient#requireVersion(String, UpdateParameters)} so callers do not
+ * need to rely on a local {@code package.json} file or other filesystem access.
+ * This makes it suitable for bundled applications, sandboxed environments, or
+ * any scenario where reading local project files is undesirable or impossible.</p>
  *
+ * <p>Field meanings:</p>
  * <ul>
- *   <li><b>packageName</b> (required) - The package identifier, e.g. "snapcode" or "@scope/name".</li>
- *   <li><b>source</b> (optional) - If the package is hosted on GitHub, provide the repository URL
- *       such as "https://github.com/Owner/Repo". Leave empty or null for npm-hosted packages.</li>
- *   <li><b>appTitle</b> (optional) - Human-friendly application title to display in UIs.
- *       If not provided, callers should fall back to using {@code packageName}.</li>
+ *   <li><b>packageName</b> (required) - The package identifier (e.g. "snapcode" or "@scope/name").
+ *       This should match the name published to the registry (npm) or the identifier used
+ *       by the jDeploy download service.</li>
+ *   <li><b>source</b> (optional) - Controls which backend the updater uses:
+ *       <ul>
+ *         <li>GitHub-hosted packages: supply the repository URL (for example,
+ *             {@code https://github.com/Owner/Repo}). The updater will attempt to fetch
+ *             package-info files from GitHub releases.</li>
+ *         <li>npm-hosted packages: leave {@code source} null or empty to instruct the updater
+ *             to use the npm registry workflow.</li>
+ *       </ul>
+ *   </li>
+ *   <li><b>appTitle</b> (optional) - Human-friendly application title to display in UI prompts.
+ *       If not provided, callers or UIs should fall back to {@code packageName}.</li>
  *   <li><b>currentVersion</b> (optional) - The currently-installed version string (e.g. "1.2.3").
- *       Can be null or empty if unknown.</li>
+ *       If omitted the updater will fall back to the {@code jdeploy.app.version} system property
+ *       to preserve legacy behavior.</li>
  * </ul>
  *
- * <p>Use the {@link Builder} for convenient construction:</p>
+ * <p>Because this object supplies all required metadata, the parameters-based workflow
+ * requires no local project files (for example, {@code package.json}). Use the
+ * {@link Builder} for convenient construction:</p>
  *
  * <pre>
  * UpdateParameters params = new UpdateParameters.Builder("my-package")
- *     .source("https://github.com/Owner/Repo")
+ *     .source("https://github.com/Owner/Repo") // Omit or set to empty string for npm-hosted packages
  *     .appTitle("My App")
  *     .currentVersion("1.0.0")
  *     .build();

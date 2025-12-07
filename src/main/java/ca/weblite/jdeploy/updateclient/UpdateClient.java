@@ -23,6 +23,33 @@ import java.util.prefs.Preferences;
 
 /**
  * Client for checking and installing application updates.
+ *
+ * <p>Supports two workflows:</p>
+ * <ol>
+ *   <li>Legacy filesystem-based workflow: callers can call {@link #requireVersion(String)} which
+ *       will attempt to discover a local {@code package.json} adjacent to the running JAR to derive
+ *       package metadata. This mode preserves historical behaviour for launcher-style deployments.</li>
+ *   <li>Parameters-based workflow (preferred): callers construct and supply an {@link UpdateParameters}
+ *       instance to {@link #requireVersion(String, UpdateParameters)}. The parameters-based overload
+ *       requires no local project files (such as {@code package.json}) and is suitable for bundled,
+ *       sandboxed, or otherwise restricted environments where filesystem access is unavailable or
+ *       undesirable.</li>
+ * </ol>
+ *
+ * <p>Notes on the {@code source} field in {@link UpdateParameters}:</p>
+ * <ul>
+ *   <li><b>GitHub-hosted packages:</b> set {@code source} to the repository URL (for example,
+ *       {@code https://github.com/Owner/Repo}). The updater will attempt to download package-info
+ *       files from GitHub releases (with a fallback to the secondary package-info file name).</li>
+ *   <li><b>npm-hosted packages:</b> leave {@code source} null or empty to instruct the updater to
+ *       use the npm registry workflow (the registry URL can be overridden via the {@code NPM_REGISTRY_URL}
+ *       environment variable).</li>
+ * </ul>
+ *
+ * <p>When using the parameters-based overload, callers should supply at least {@code packageName}.
+ * Optionally provide {@code currentVersion} (the updater will otherwise consult the
+ * {@code jdeploy.app.version} system property to preserve legacy behaviour). The {@code appTitle}
+ * can be supplied to improve UI prompts; if omitted UIs should fall back to {@code packageName}.</p>
  */
 public class UpdateClient {
 
