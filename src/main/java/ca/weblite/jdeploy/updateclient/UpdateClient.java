@@ -111,50 +111,39 @@ public class UpdateClient {
               launcherVersion = "0.0.0";
             }
 
-            // Use launcherVersion as the canonical currentVersion for later logic and UI.
+            // Use launcherVersion as the canonical currentVersion for later logic.
             String currentVersion = launcherVersion;
 
-            // Legacy semantics adjusted to use launcherVersion:
-            // - If the launcherVersion is a branch version, or already >= requiredVersion, return early.
+            // If branch version or already >= requiredVersion, return early (no update required).
             if (isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
               return new UpdateResult(this, params.getPackageName(), params.getSource(), currentVersion,
                   requiredVersion, false);
             }
 
-            boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
-
             String packageName = params.getPackageName();
             String source = params.getSource() == null ? "" : params.getSource();
-            String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
 
-            // Early preferences gating using helper
+            // Respect early preference gating (ignore / defer). If gating says skip, return not required.
             if (shouldSkipPrompt(packageName, source, requiredVersion)) {
               return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false);
             }
 
-            // Fetch latest version (network)
+            // Determine whether to include prereleases in the lookup.
+            boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
+
+            // Fetch latest version (network). Any IO error will be wrapped and complete exceptionally.
             String latestVersion = findLatestVersion(packageName, source, isPrerelease);
 
-            // If user chose to ignore this specific latest version previously, skip prompting
+            // If the latest version was already explicitly ignored, do not require update.
             String ignoredVersion = getIgnoredVersion(packageName, source);
             if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
               return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
             }
 
-            UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion);
-
-            if (decision == UpdateDecision.IGNORE) {
-              // Persist ignored version so we don't prompt again for this exact version
-              setIgnoredVersion(packageName, source, latestVersion);
-              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
-            } else if (decision == UpdateDecision.LATER) {
-              long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
-              setDeferUntil(packageName, source, until);
-              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, false, latestVersion);
-            } else {
-              // UPDATE_NOW - return an UpdateResult that can launch the installer upon caller's request
-              return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, true, latestVersion);
-            }
+            // At this point, we have a candidate latestVersion and the launcher is older than requiredVersion.
+            // Do NOT prompt the user, change preferences, or exit here. The caller can inspect the result
+            // and call UpdateResult.launchInstaller() if they wish to proceed.
+            return new UpdateResult(this, packageName, source, currentVersion, requiredVersion, true, latestVersion);
           } catch (IOException e) {
             throw new CompletionException(e);
           }
