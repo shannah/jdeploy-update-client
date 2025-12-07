@@ -111,10 +111,12 @@ public class UpdateClient {
      * Overload of requireVersion that accepts an UpdateParameters instance so callers
      * can perform update checks without needing a local package.json or file system access.
      *
-     * Legacy semantics are preserved:
-     * - Resolve currentVersion from params.getCurrentVersion(), or fall back to System.getProperty("jdeploy.app.version").
-     * - If currentVersion is null, or is a branch version, or compareVersion(currentVersion, requiredVersion) >= 0
-     *   then the method returns early (no prompt or network access).
+     * Legacy semantics are preserved with two important differences:
+     * - The system property {@code jdeploy.app.version} MUST be present for any update check to proceed.
+     *   If it is missing or empty, this method returns immediately (no prompts, no network).
+     * - The version used for comparisons is taken from {@code jdeploy.launcher.app.version}. If that
+     *   property is missing or empty it defaults to {@code "0.0.0"}. The {@link UpdateParameters#getCurrentVersion()}
+     *   value is ignored for comparison purposes.
      *
      * @param requiredVersion the required version string
      * @param params parameters describing the application (packageName is required)
@@ -127,14 +129,26 @@ public class UpdateClient {
             throw new IllegalArgumentException("params must not be null");
         }
 
-        // Resolve current version from params, falling back to system property
-        String currentVersion = params.getCurrentVersion();
-        if (currentVersion == null || currentVersion.isEmpty()) {
-            currentVersion = System.getProperty("jdeploy.app.version");
+        // Prerequisite: the app must be running under the jdeploy launcher.
+        // If jdeploy.app.version is not set, do not perform update checks.
+        String appVersionProperty = System.getProperty("jdeploy.app.version");
+        if (appVersionProperty == null || appVersionProperty.isEmpty()) {
+            // Not running via jdeploy launcher; preserve legacy behaviour by doing nothing.
+            return;
         }
 
-        // Legacy semantics: if currentVersion is null, or a branch version, or already >= requiredVersion, return early
-        if (currentVersion == null || isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
+        // Use the launcher's reported app version for comparisons. Default to "0.0.0" if missing.
+        String launcherVersion = System.getProperty("jdeploy.launcher.app.version");
+        if (launcherVersion == null || launcherVersion.isEmpty()) {
+            launcherVersion = "0.0.0";
+        }
+
+        // Use launcherVersion as the canonical currentVersion for later logic and UI.
+        String currentVersion = launcherVersion;
+
+        // Legacy semantics adjusted to use launcherVersion:
+        // - If the launcherVersion is a branch version, or already >= requiredVersion, return early.
+        if (isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
             return;
         }
 
@@ -145,19 +159,19 @@ public class UpdateClient {
         String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
 
         try {
-                    // Early preferences gating using helper
-                    if (shouldSkipPrompt(packageName, source, requiredVersion)) {
-                        return;
-                    }
+            // Early preferences gating using helper
+            if (shouldSkipPrompt(packageName, source, requiredVersion)) {
+                return;
+            }
 
-                    // Fetch latest version (network)
-                    String latestVersion = findLatestVersion(packageName, source, isPrerelease);
+            // Fetch latest version (network)
+            String latestVersion = findLatestVersion(packageName, source, isPrerelease);
 
-                    // If user chose to ignore this specific latest version previously, skip prompting
-                    String ignoredVersion = getIgnoredVersion(packageName, source);
-                    if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
-                        return;
-                    }
+            // If user chose to ignore this specific latest version previously, skip prompting
+            String ignoredVersion = getIgnoredVersion(packageName, source);
+            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
+                return;
+            }
 
             UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion, source);
 
