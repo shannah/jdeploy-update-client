@@ -32,11 +32,18 @@ import javax.swing.*;
 /**
  * Client for checking and installing application updates.
  *
+ * <p>The updater exposes an async-first API for checking whether an application update is
+ * required and for launching the installer. Callers are encouraged to use {@link
+ * #requireVersionAsync(String, UpdateParameters)} which performs the check asynchronously and
+ * returns an {@link UpdateResult} that the caller can inspect and act upon. This decouples the
+ * network/IO-based check from installer launch and JVM shutdown so callers can perform cleanup
+ * (for example, saving user data) before exiting the process.
+ *
  * <p>Supports one workflow:
  *
  * <ol>
  *   <li>Parameters-based workflow (preferred): callers construct and supply an {@link
- *       UpdateParameters} instance to {@link #requireVersion(String, UpdateParameters)}. The
+ *       UpdateParameters} instance to {@link #requireVersionAsync(String, UpdateParameters)}. The
  *       parameters-based overload requires no local project files (such as {@code package.json})
  *       and is suitable for bundled, sandboxed, or otherwise restricted environments where
  *       filesystem access is unavailable or undesirable.
@@ -57,6 +64,31 @@ import javax.swing.*;
  * Optionally provide {@code currentVersion} (the updater will otherwise consult the {@code
  * jdeploy.app.version} system property to preserve legacy behaviour). The {@code appTitle} can be
  * supplied to improve UI prompts; if omitted UIs should fall back to {@code packageName}.
+ *
+ * <p>Example usage (async-first, caller-controlled installer launch and JVM exit):
+ *
+ * <pre>
+ * // Preferred: check asynchronously, then if update required, launch the installer,
+ * // do any required cleanup (save state, flush logs, etc.) and then exit.
+ * client.requireVersionAsync("2.0.0", params)
+ *       .thenApply(result -> {
+ *           if (result.isRequired()) {
+ *               try {
+ *                   result.launchInstaller();
+ *                   // perform cleanup (save state, flush logs, etc.)
+ *                   System.exit(0);
+ *               } catch (IOException e) {
+ *                   // handle download/launch error as appropriate
+ *               }
+ *           }
+ *           return result;
+ *       });
+ * </pre>
+ *
+ * <p>When using the async API the {@link UpdateResult#launchInstaller()} method does NOT call
+ * {@code System.exit(0)}. Callers should perform any necessary cleanup and then exit the JVM if
+ * desired. The async pattern avoids forcing shutdown from library code and allows applications to
+ * preserve data or flush logs before terminating.
  */
 public class UpdateClient {
 
@@ -70,15 +102,42 @@ public class UpdateClient {
   }
 
   /**
-   * Asynchronous version of requireVersion. Returns a CompletableFuture that completes with an
-   * UpdateResult describing the outcome of the check. If the user chose "Update Now", the
-   * returned UpdateResult will have isRequired()==true and callers can invoke {@link
-   * UpdateResult#launchInstaller()} to download and run the installer.
+   * Asynchronous version of requireVersion.
    *
-   * The method preserves previous gating semantics (jdeploy.app.version must be set, launcher
-   * version is used for comparisons, preferences are consulted for ignore/defer).
+   * <p>Returns a {@link java.util.concurrent.CompletableFuture} that completes with an {@link
+   * UpdateResult} describing the outcome of the check. The returned {@link UpdateResult} will
+   * indicate whether an update is required via {@link UpdateResult#isRequired()}. If an update is
+   * required the caller may invoke {@link UpdateResult#launchInstaller()} to download and launch
+   * the installer. Importantly, {@link UpdateResult#launchInstaller()} does NOT call {@code
+   * System.exit(0)}; callers should perform any necessary cleanup and exit the JVM if desired.
    *
-   * Any IO errors will complete the future exceptionally with an IOException.
+   * <p>The method preserves previous gating semantics: {@code jdeploy.app.version} must be set for
+   * checks to proceed, the launcher-reported version ({@code jdeploy.launcher.app.version}) is used
+   * as the canonical current version for comparisons, and preferences are consulted for ignore/defer
+   * behavior.
+   *
+   * <p>Any IO errors will complete the future exceptionally with an {@link IOException}.
+   *
+   * <p>Example usage showing an inline handler that launches the installer and then exits:
+   *
+   * <pre>
+   * client.requireVersionAsync("2.0.0", params)
+   *       .thenApply(result -> {
+   *           if (result.isRequired()) {
+   *               try {
+   *                   result.launchInstaller();
+   *                   // perform cleanup here (save files, flush logs, etc.)
+   *                   System.exit(0);
+   *               } catch (IOException e) {
+   *                   // handle download/launch failure
+   *               }
+   *           }
+   *           return result;
+   *       });
+   * </pre>
+   *
+   * Note: {@link UpdateResult#launchInstaller()} does NOT call {@code System.exit(0)}.
+   * Callers are responsible for performing any necessary cleanup and exiting the JVM if desired.
    *
    * @param requiredVersion the required version string
    * @param params parameters describing the application (packageName is required)
