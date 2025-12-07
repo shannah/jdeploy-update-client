@@ -58,7 +58,7 @@ jobs:
         run: |
           # Configure GPG to be non-interactive
           export GPG_TTY=$(tty)
-          ./gradlew clean build publishToMavenCentral -x test --no-daemon --stacktrace \
+          ./gradlew clean build publishAllPublicationsToCentralPortal -x test --no-daemon --stacktrace \
             -Psigning.gnupg.executable=gpg \
             -Psigning.gnupg.useLegacyGpg=false \
             -Psigning.gnupg.passphrase="${{ secrets.GPG_PASSPHRASE }}"

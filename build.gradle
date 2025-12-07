@@ -9,6 +9,8 @@ plugins {
     id 'checkstyle'
     // Use SpotBugs 4.x series which is more likely to be compatible with older JVM bytecode expectations
     id 'com.github.spotbugs' version '4.7.6'
+    // Maven Central Portal publishing
+    id 'com.gradleup.nmcp' version '1.3.0'
 }
 
 group = 'ca.weblite'
@@ -165,15 +167,7 @@ publishing {
         }
     }
 
-    repositories {
-        maven {
-            name = 'central'
-            // For Maven Central Portal, we need to use a different publishing approach
-            // The portal requires uploading a bundle ZIP file
-            // We'll use a custom task for this instead of standard maven-publish
-            url = uri(layout.buildDirectory.dir('staging-deploy'))
-        }
-    }
+    // No repositories needed - nmcp plugin handles Maven Central Portal publishing
 }
 
 // Signing configuration
@@ -191,52 +185,12 @@ tasks.withType(Sign) {
     dependsOn shadowJar, sourcesJar, javadocJar
 }
 
-// Create a bundle for Maven Central Portal
-tasks.register('createMavenCentralBundle', Zip) {
-    dependsOn 'publishMavenJavaPublicationToCentralRepository'
-    from layout.buildDirectory.dir('staging-deploy')
-    archiveFileName = "${project.name}-${project.version}-bundle.zip"
-    destinationDirectory = layout.buildDirectory.dir('maven-central')
-}
-
-// Upload bundle to Maven Central Portal
-tasks.register('publishToMavenCentral') {
-    dependsOn 'createMavenCentralBundle'
-    group = 'publishing'
-    description = 'Publish artifacts to Maven Central Portal'
-
-    doLast {
-        def bundleFile = file("${layout.buildDirectory.get()}/maven-central/${project.name}-${project.version}-bundle.zip")
-        def username = System.getenv('MAVEN_CENTRAL_USERNAME')
-        def password = System.getenv('MAVEN_CENTRAL_PASSWORD')
-
-        if (!username || !password) {
-            throw new GradleException('MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD environment variables must be set')
-        }
-
-        println "Uploading bundle to Maven Central Portal..."
-
-        def auth = "${username}:${password}".bytes.encodeBase64().toString()
-        def url = new URL("https://central.sonatype.com/api/v1/publisher/upload?name=${project.name}-${project.version}&publishingType=AUTOMATIC")
-        def connection = url.openConnection() as HttpURLConnection
-        connection.requestMethod = 'POST'
-        connection.setRequestProperty('Authorization', "Bearer ${auth}")
-        connection.setRequestProperty('Content-Type', 'application/zip')
-        connection.doOutput = true
-
-        bundleFile.withInputStream { input ->
-            connection.outputStream.withStream { output ->
-                output << input
-            }
-        }
-
-        def responseCode = connection.responseCode
-        if (responseCode == 201) {
-            println "Successfully uploaded to Maven Central Portal"
-            println connection.inputStream.text
-        } else {
-            def error = connection.errorStream?.text ?: "No error message"
-            throw new GradleException("Failed to upload to Maven Central Portal. Response code: ${responseCode}, Error: ${error}")
-        }
+// Configure Maven Central Portal publishing using nmcp plugin
+nmcp {
+    publishAllPublications {
+        username = System.getenv('MAVEN_CENTRAL_USERNAME') ?: project.findProperty('mavenCentralUsername')
+        password = System.getenv('MAVEN_CENTRAL_PASSWORD') ?: project.findProperty('mavenCentralPassword')
+        // Automatically publish after validation passes
+        publicationType = "AUTOMATIC"
     }
 }
