@@ -9,6 +9,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.ProtocolException;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -610,22 +611,41 @@ public class UpdateClient {
    */
   private JsonObject downloadAndParsePackageInfo(String urlString) throws IOException {
     URL url = new URL(urlString);
-    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-    connection.setConnectTimeout(5000);
-    connection.setReadTimeout(10000);
-    connection.setRequestMethod("GET");
-
-    int responseCode = connection.getResponseCode();
-    if (responseCode != HttpURLConnection.HTTP_OK) {
-      throw new IOException(
-          "HTTP error " + responseCode + " downloading package-info from " + urlString);
-    }
-
     String content;
-    try (InputStream in = connection.getInputStream()) {
-      content = readStreamToString(in);
-    } finally {
-      connection.disconnect();
+
+    // Open a URLConnection and handle HTTP(S) specially (to check response codes).
+    java.net.URLConnection urlConnection = url.openConnection();
+
+    if (urlConnection instanceof HttpURLConnection) {
+      HttpURLConnection httpConn = (HttpURLConnection) urlConnection;
+      httpConn.setConnectTimeout(5000);
+      httpConn.setReadTimeout(10000);
+      try {
+        httpConn.setRequestMethod("GET");
+      } catch (ProtocolException ignored) {
+        // Some HttpURLConnection implementations may not support changing the method;
+        // ignore and proceed to read the input stream.
+      }
+
+      int responseCode = httpConn.getResponseCode();
+      if (responseCode != HttpURLConnection.HTTP_OK) {
+        httpConn.disconnect();
+        throw new IOException(
+            "HTTP error " + responseCode + " downloading package-info from " + urlString);
+      }
+
+      try (InputStream in = httpConn.getInputStream()) {
+        content = readStreamToString(in);
+      } finally {
+        httpConn.disconnect();
+      }
+    } else {
+      // Non-HTTP protocols (e.g., file:) - just open the stream and read the content.
+      try (InputStream in = urlConnection.getInputStream()) {
+        content = readStreamToString(in);
+      } catch (IOException e) {
+        throw new IOException("Error reading package-info from " + urlString + ": " + e.getMessage(), e);
+      }
     }
 
     // Parse and validate JSON
