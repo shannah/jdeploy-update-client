@@ -3,21 +3,89 @@
     "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
     "https://checkstyle.org/dtds/configuration_1_3.dtd">
 
+<!--
+  Google-style based Checkstyle configuration, relaxed for library projects.
+  - Javadoc is required only for public and protected APIs (not package/private).
+  - Line length is set to 120 characters.
+  - Commonly noisy rules are not enabled or are relaxed.
+  Compatible with Checkstyle 8.45.1.
+-->
 <module name="Checker">
-  <!-- A small, pragmatic set of checks to get started. Adjust as needed. -->
   <property name="severity" value="warning"/>
 
+  <!-- Allow toggling checks in source with:
+       // CHECKSTYLE:OFF
+       ...code...
+       // CHECKSTYLE:ON
+  -->
+  <module name="SuppressionCommentFilter">
+    <property name="offCommentFormat" value="CHECKSTYLE:OFF"/>
+    <property name="onCommentFormat" value="CHECKSTYLE:ON"/>
+  </module>
+
+  <!-- Basic file-level checks -->
+  <module name="NewlineAtEndOfFile"/>
+  <module name="FileTabCharacter">
+    <property name="eachLine" value="true"/>
+  </module>
+
   <module name="TreeWalker">
+    <!-- Javadoc checks: only require for public/protected APIs -->
+    <module name="JavadocMethod">
+      <property name="scope" value="public,protected"/>
+      <!-- Allow some missing tags to reduce noise in libraries -->
+      <property name="allowMissingParamTags" value="true"/>
+      <property name="allowMissingThrowsTags" value="true"/>
+      <property name="allowInherited" value="true"/>
+    </module>
+
+    <module name="JavadocType">
+      <property name="scope" value="public,protected"/>
+    </module>
+
+    <!-- Do not enforce Javadoc on variables by default (too noisy for fields) -->
+    <module name="JavadocVariable">
+      <property name="scope" value="public,protected"/>
+    </module>
+
+    <!-- Whitespace and formatting -->
     <module name="Indentation"/>
     <module name="WhitespaceAfter"/>
     <module name="WhitespaceAround"/>
     <module name="LeftCurly"/>
     <module name="RightCurly"/>
     <module name="NeedBraces"/>
+
+    <!-- Line length: allow up to 120 characters. Ignore import/package lines and URLs. -->
     <module name="LineLength">
       <property name="max" value="120"/>
+      <property name="ignorePattern" value="^package |^import |http[s]?://"/>
     </module>
+
     <module name="EmptyLineSeparator"/>
+    <module name="EmptyBlock">
+      <property name="option" value="text"/>
+    </module>
+
+    <!-- Imports -->
+    <module name="AvoidStarImport"/>
+    <module name="UnusedImports"/>
+
+    <!-- Naming and visibility (relaxed defaults consistent with Google style) -->
+    <module name="TypeName"/>
+    <module name="MethodName">
+      <property name="format" value="^[a-z][a-zA-Z0-9]*$"/>
+    </module>
+    <module name="ParameterName"/>
+    <module name="LocalVariableName"/>
+
+    <!-- Visibility modifier presence is allowed (libraries often use package-private types) -->
+    <module name="VisibilityModifier">
+      <property name="protectedAllowed" value="true"/>
+      <property name="packageAllowed" value="true"/>
+    </module>
+
+    <!-- Keep final local variable suggestion (can be helpful) -->
     <module name="FinalLocalVariable"/>
   </module>
 </module>

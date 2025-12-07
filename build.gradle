@@ -1,7 +1,13 @@
 plugins {
     id 'java-library'
     id 'maven-publish'
-    id 'com.github.johnrengelman.shadow' version '8.1.1'
+    // Use a Shadow plugin version compatible with a wider range of Gradle/JVM setups
+    id 'com.github.johnrengelman.shadow' version '7.1.2'
+    // Use a conservative Spotless version
+    id 'com.diffplug.spotless' version '6.18.0'
+    id 'checkstyle'
+    // Use SpotBugs 4.x series which is more likely to be compatible with older JVM bytecode expectations
+    id 'com.github.spotbugs' version '4.7.6'
 }
 
 group = 'ca.weblite.jdeploy'
@@ -25,6 +31,60 @@ tasks.withType(JavaCompile) {
     options.encoding = 'UTF-8'
 }
 
+/*
+ * Spotless - code formatting using google-java-format
+ */
+spotless {
+    java {
+        target 'src/**/*.java'
+        // google-java-format version is kept reasonable; Spotless will download the tool as needed
+        googleJavaFormat('1.15.0')
+    }
+}
+
+/*
+ * Checkstyle configuration
+ *
+ * Use a Checkstyle tool version more compatible with older JVM bytecode (8.x series).
+ * If you prefer the newer Checkstyle features, you can try a newer toolVersion
+ * but that may require a newer JDK to execute.
+ */
+checkstyle {
+    toolVersion = '8.45.1'
+    configFile = file('config/checkstyle/checkstyle.xml')
+}
+
+// Configure Checkstyle tasks to produce HTML reports (and disable XML)
+tasks.withType(Checkstyle).configureEach { task ->
+    reports {
+        // Prefer Gradle 7+/8+ API; fall back to older API if needed
+        try {
+            xml.required = false
+            html.required = true
+        } catch (Throwable ignored) {
+            // Older Gradle fallback
+            xml.enabled = false
+            html.enabled = true
+        }
+    }
+}
+
+/*
+ * SpotBugs configuration
+ *
+ * Configure the generated spotbugs tasks to produce HTML reports.
+ * Use tasks.matching to configure both spotbugsMain and spotbugsTest if they are present.
+ */
+tasks.matching { it.name == 'spotbugsMain' || it.name == 'spotbugsTest' }.configureEach { task ->
+    // The SpotBugs Gradle plugin exposes a `reports` closure on SpotBugsTask
+    // Configure HTML output, disable XML (optional)
+    task.reports {
+        xml.enabled = false
+        html.enabled = true
+        html.destination = file("$buildDir/reports/spotbugs/${task.name}.html")
+    }
+}
+
 shadowJar {
     relocate 'com.eclipsesource.json', 'ca.weblite.jdeploy.updateclient.shaded.json'
     archiveClassifier.set('')
@@ -32,3 +92,15 @@ shadowJar {
 
 // Make build use shadowJar
 build.dependsOn shadowJar
+
+// Ensure check depends on formatting / lint tasks
+tasks.named('check') {
+    dependsOn 'spotlessCheck', 'checkstyleMain', 'checkstyleTest', 'spotbugsMain', 'spotbugsTest'
+}
+
+// Aggregate lint task to run formatting and static analysis checks
+tasks.register('lint') {
+    group = 'verification'
+    description = 'Run formatting, style checks and static analysis (spotless, checkstyle, spotbugs)'
+    dependsOn 'spotlessCheck', 'checkstyleMain', 'checkstyleTest', 'spotbugsMain', 'spotbugsTest'
+}
