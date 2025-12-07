@@ -181,5 +181,38 @@ public class UpdateClientTest {
         constructUrl.setAccessible(true);
         String url = (String) constructUrl.invoke(client, "pkg", "0.1.0", "");
         assertTrue(url.contains("platform=mac-arm64"));
+        // macOS should not include an explicit 'format' parameter in the URL
+        assertFalse("macOS URL should not contain 'format=' param", url.contains("format="));
+    }
+
+    @Test
+    public void testDetectPlatformAndConstructURL_linux_x86_64() throws Exception {
+        // Simulate Linux x86_64
+        System.setProperty("os.name", "Linux");
+        System.setProperty("os.arch", "amd64");
+
+        UpdateClient client = new UpdateClient();
+
+        Method detect = UpdateClient.class.getDeclaredMethod("detectPlatformAndFormat");
+        detect.setAccessible(true);
+        Object platformInfo = detect.invoke(client);
+        assertNotNull(platformInfo);
+
+        Field platformField = platformInfo.getClass().getDeclaredField("platform");
+        platformField.setAccessible(true);
+        Field formatField = platformInfo.getClass().getDeclaredField("format");
+        formatField.setAccessible(true);
+
+        String platform = (String) platformField.get(platformInfo);
+        String format = (String) formatField.get(platformInfo);
+
+        assertEquals("linux", platform);
+        assertEquals("gz", format);
+
+        Method constructUrl = UpdateClient.class.getDeclaredMethod("constructInstallerDownloadURL", String.class, String.class, String.class);
+        constructUrl.setAccessible(true);
+        String url = (String) constructUrl.invoke(client, "mypkg", "1.2.3", "");
+        assertNotNull(url);
+        assertTrue("Linux URL should include format=gz", url.contains("format=gz"));
     }
 }
