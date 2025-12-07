@@ -84,8 +84,12 @@ public final class ManualUpdateController {
       client.setPreferencesNodeName(projectCode);
     }
 
-    // Invoke the asynchronous update check. If an update is required, launch the installer and
-    // exit the JVM to simulate legacy behavior. Otherwise, continue running and show the window.
+    // Invoke the asynchronous update check. The returned CompletableFuture completes only after
+    // the update decision has been resolved (the user has chosen Update Now / Later / Ignore),
+    // except in headless mode where a conservative default (Later) is chosen immediately.
+    // In the continuation it is safe to call result.launchInstaller() to download and run the
+    // installer; callers can then perform any cleanup and call System.exit(0) to emulate legacy
+    // behavior if desired.
     client.requireVersionAsync(requiredVersion, params)
         .thenAccept(
             result -> {
