@@ -85,31 +85,34 @@ public class UpdateClient {
             *             optional currentVersion).
             */
           @Deprecated
-          public void requireVersion(String requiredVersion) throws IOException{
-                 if (requiredVersion == null || requiredVersion.isEmpty()) {
-                       return;
-                 }
+          public void requireVersion(String requiredVersion) {
+              if (requiredVersion == null || requiredVersion.isEmpty()) {
+                  return;
+              }
+              try {
+                  // Locate package.json from the running jar location and parse it for package metadata.
+                  Path jarPath = findCurrentJarPath();
+                  Path packageJsonPath = findPackageJson(jarPath.toString());
+                  PackageInfo packageInfo = parsePackageJson(packageJsonPath);
 
-                   // Locate package.json from the running jar location and parse it for package metadata.
-                   Path jarPath = findCurrentJarPath();
-                   Path packageJsonPath = findPackageJson(jarPath.toString());
-                   PackageInfo packageInfo = parsePackageJson(packageJsonPath);
+                  String packageName = packageInfo.name;
+                  String source = packageInfo.source == null ? "" : packageInfo.source;
+                  String appTitle = packageInfo.appTitle == null ? packageName : packageInfo.appTitle;
 
-                   String packageName = packageInfo.name;
-                   String source = packageInfo.source == null ? "" : packageInfo.source;
-                   String appTitle = packageInfo.appTitle == null ? packageName : packageInfo.appTitle;
+                  // Resolve current version from system property (legacy behavior)
+                  String currentVersion = System.getProperty("jdeploy.app.version");
 
-                   // Resolve current version from system property (legacy behavior)
-                   String currentVersion = System.getProperty("jdeploy.app.version");
+                  UpdateParameters params = new UpdateParameters.Builder(packageName)
+                          .source(source)
+                          .appTitle(appTitle)
+                          .currentVersion(currentVersion)
+                          .build();
 
-                   UpdateParameters params = new UpdateParameters.Builder(packageName)
-                                .source(source)
-                                .appTitle(appTitle)
-                                .currentVersion(currentVersion)
-                                .build();
-
-                   // Delegate to the new parameters-based overload
-                   requireVersion(requiredVersion, params);
+                  // Delegate to the new parameters-based overload
+                  requireVersion(requiredVersion, params);
+              } catch (IOException e) {
+                  throw new RuntimeException(e);
+              }
           }
 
     /**
@@ -126,7 +129,7 @@ public class UpdateClient {
      * @param requiredVersion the required version string
      * @param params parameters describing the application (packageName is required)
      */
-    public void requireVersion(String requiredVersion, UpdateParameters params) throws IOException {
+    public void requireVersion(String requiredVersion, UpdateParameters params) {
         if (requiredVersion == null || requiredVersion.isEmpty()) {
             return;
         }
@@ -134,64 +137,68 @@ public class UpdateClient {
             throw new IllegalArgumentException("params must not be null");
         }
 
-        // Prerequisite: the app must be running under the jdeploy launcher.
-        // If jdeploy.app.version is not set, do not perform update checks.
-        String appVersionProperty = System.getProperty("jdeploy.app.version");
-        if (appVersionProperty == null || appVersionProperty.isEmpty()) {
-            // Not running via jdeploy launcher; preserve legacy behaviour by doing nothing.
-            return;
-        }
+        try {
+            // Prerequisite: the app must be running under the jdeploy launcher.
+            // If jdeploy.app.version is not set, do not perform update checks.
+            String appVersionProperty = System.getProperty("jdeploy.app.version");
+            if (appVersionProperty == null || appVersionProperty.isEmpty()) {
+                // Not running via jdeploy launcher; preserve legacy behaviour by doing nothing.
+                return;
+            }
 
-        // Use the launcher's reported app version for comparisons. Default to "0.0.0" if missing.
-        String launcherVersion = System.getProperty("jdeploy.launcher.app.version");
-        if (launcherVersion == null || launcherVersion.isEmpty()) {
-            launcherVersion = "0.0.0";
-        }
+            // Use the launcher's reported app version for comparisons. Default to "0.0.0" if missing.
+            String launcherVersion = System.getProperty("jdeploy.launcher.app.version");
+            if (launcherVersion == null || launcherVersion.isEmpty()) {
+                launcherVersion = "0.0.0";
+            }
 
-        // Use launcherVersion as the canonical currentVersion for later logic and UI.
-        String currentVersion = launcherVersion;
+            // Use launcherVersion as the canonical currentVersion for later logic and UI.
+            String currentVersion = launcherVersion;
 
-        // Legacy semantics adjusted to use launcherVersion:
-        // - If the launcherVersion is a branch version, or already >= requiredVersion, return early.
-        if (isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
-            return;
-        }
+            // Legacy semantics adjusted to use launcherVersion:
+            // - If the launcherVersion is a branch version, or already >= requiredVersion, return early.
+            if (isBranchVersion(currentVersion) || compareVersion(currentVersion, requiredVersion) >= 0) {
+                return;
+            }
 
-        boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
+            boolean isPrerelease = "true".equals(System.getProperty("jdeploy.prerelease", "false"));
 
-        String packageName = params.getPackageName();
-        String source = params.getSource() == null ? "" : params.getSource();
-        String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
+            String packageName = params.getPackageName();
+            String source = params.getSource() == null ? "" : params.getSource();
+            String appTitle = params.getAppTitle() == null ? packageName : params.getAppTitle();
 
 
-        // Early preferences gating using helper
-        if (shouldSkipPrompt(packageName, source, requiredVersion)) {
-            return;
-        }
+            // Early preferences gating using helper
+            if (shouldSkipPrompt(packageName, source, requiredVersion)) {
+                return;
+            }
 
-        // Fetch latest version (network)
-        String latestVersion = findLatestVersion(packageName, source, isPrerelease);
+            // Fetch latest version (network)
+            String latestVersion = findLatestVersion(packageName, source, isPrerelease);
 
-        // If user chose to ignore this specific latest version previously, skip prompting
-        String ignoredVersion = getIgnoredVersion(packageName, source);
-        if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
-            return;
-        }
+            // If user chose to ignore this specific latest version previously, skip prompting
+            String ignoredVersion = getIgnoredVersion(packageName, source);
+            if (ignoredVersion != null && !ignoredVersion.isEmpty() && ignoredVersion.equals(latestVersion)) {
+                return;
+            }
 
-        UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion, source);
+            UpdateDecision decision = promptForUpdate(packageName, appTitle, currentVersion, requiredVersion, source);
 
-        if (decision == UpdateDecision.IGNORE) {
-            // Persist ignored version so we don't prompt again for this exact version
-            setIgnoredVersion(packageName, source, latestVersion);
-            return;
-        } else if (decision == UpdateDecision.LATER) {
-            long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
-            setDeferUntil(packageName, source, until);
-            return;
-        } else {
-            // UPDATE_NOW - proceed to download & run installer for latestVersion
-            String installer = downloadInstaller(packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
-            runInstaller(installer);
+            if (decision == UpdateDecision.IGNORE) {
+                // Persist ignored version so we don't prompt again for this exact version
+                setIgnoredVersion(packageName, source, latestVersion);
+                return;
+            } else if (decision == UpdateDecision.LATER) {
+                long until = System.currentTimeMillis() + (long) DEFAULT_DEFER_DAYS * 24L * 60L * 60L * 1000L;
+                setDeferUntil(packageName, source, until);
+                return;
+            } else {
+                // UPDATE_NOW - proceed to download & run installer for latestVersion
+                String installer = downloadInstaller(packageName, latestVersion, source, System.getProperty("java.io.tmpdir"));
+                runInstaller(installer);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
